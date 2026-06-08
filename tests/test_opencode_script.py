@@ -41,6 +41,32 @@ class OpenCodeScriptTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(OpenCodeAgent._extract_text_response(events), "done")
 
+    def test_extract_text_response_uses_last_text_run(self):
+        raw = "\n".join(
+            [
+                '{"type":"text","part":{"type":"text","text":"Now let me inspect the repo first."}}',
+                '{"type":"tool_use","part":{"type":"tool","tool":"read"}}',
+                '{"type":"text","part":{"type":"text","text":"{\\"ok\\":"}}',
+                '{"type":"text","part":{"type":"text","text":" true}"}}',
+            ]
+        )
+        events = OpenCodeAgent._parse_event_stream(raw)
+        self.assertEqual(OpenCodeAgent._extract_text_response(events), '{"ok": true}')
+
+    def test_extract_text_response_prefers_structured_text_run(self):
+        raw = "\n".join(
+            [
+                '{"type":"text","part":{"type":"text","text":"thinking out loud"}}',
+                '{"type":"step_finish","part":{"type":"step-finish"}}',
+                '{"type":"text","part":{"type":"text","text":"```json\\n{\\"result\\": \\"ok\\"}\\n```"}}',
+            ]
+        )
+        events = OpenCodeAgent._parse_event_stream(raw)
+        self.assertEqual(
+            OpenCodeAgent._extract_text_response(events),
+            '```json\n{"result": "ok"}\n```',
+        )
+
     def test_build_empty_output_message_includes_stdout_and_stderr_preview(self):
         agent = OpenCodeAgent.__new__(OpenCodeAgent)
         agent.project_path = "/tmp/project"

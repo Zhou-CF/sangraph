@@ -272,16 +272,38 @@ class OpenCodeAgent:
 
     @staticmethod
     def _extract_text_response(events: list[dict[str, Any]]) -> str:
-        text_parts: list[str] = []
+        text_runs: list[str] = []
+        current_run: list[str] = []
         for event in events:
             if event.get("type") != "text":
+                if current_run:
+                    text_runs.append("".join(current_run))
+                    current_run = []
                 continue
             part = event.get("part")
             if isinstance(part, dict):
                 text = part.get("text")
                 if isinstance(text, str):
-                    text_parts.append(text)
-        return "".join(text_parts)
+                    current_run.append(text)
+        if current_run:
+            text_runs.append("".join(current_run))
+
+        if not text_runs:
+            return ""
+
+        for candidate in reversed(text_runs):
+            if OpenCodeAgent._looks_like_structured_output(candidate):
+                return candidate
+        return text_runs[-1]
+
+    @staticmethod
+    def _looks_like_structured_output(text: str) -> bool:
+        stripped = text.strip()
+        if not stripped:
+            return False
+        if stripped.startswith(("```", "{", "[")):
+            return True
+        return "```" in stripped and any(token in stripped for token in ("{", "["))
 
     def _write_temp_config(self, config_dir: str) -> str:
         payload = {

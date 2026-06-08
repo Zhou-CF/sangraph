@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from dotenv import load_dotenv
+from json_repair import repair_json
 from langchain_core.output_parsers import PydanticOutputParser
 from langgraph.graph import END, START, StateGraph
 from sangraph_logging import get_logger
@@ -41,6 +43,7 @@ logger = get_logger(__name__)
 
 
 StageFn = Callable[[StateGraphStruct], Awaitable[StateGraphStruct]]
+CODE_FENCE_PATTERN = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 
 
 def _resolve_repo_path(path: str | Path) -> Path:
@@ -61,6 +64,34 @@ def _prompt_text(name: str) -> str:
 
 def _patch_text(path: str) -> str:
     return _resolve_repo_path(path).read_text(encoding="utf-8", errors="ignore")
+
+
+def _strip_code_fence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    matches = CODE_FENCE_PATTERN.findall(stripped)
+    if matches:
+        return matches[-1].strip()
+    return stripped
+
+
+def _parse_deep_analysis_response(
+    response: str,
+    parser: PydanticOutputParser,
+) -> DeepAnalysisStruct:
+    try:
+        return parser.parse(response)
+    except Exception:
+        stripped = _strip_code_fence(response)
+        if stripped:
+            try:
+                repaired = repair_json(stripped, return_objects=True)
+                if isinstance(repaired, dict):
+                    return DeepAnalysisStruct.model_validate(repaired)
+            except Exception:
+                pass
+        raise
 
 
 def _default_llm():
@@ -882,7 +913,7 @@ async def deep_context_analysis(state: StateGraphStruct) -> StateGraphStruct:
         model=os.getenv("OPENCODE_MODEL", DEFAULT_OPENCODE_MODEL),
     )
     response = opencode.chat(prompt)
-    deep_result = parser.parse(response)
+    deep_result = _parse_deep_analysis_response(response, parser)
     return {
         "deep_analysis_attempted": True,
         "deep_analysis_result": response,

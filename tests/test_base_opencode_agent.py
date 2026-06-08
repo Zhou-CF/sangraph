@@ -413,6 +413,76 @@ class BaseOpenCodeAgentTests(unittest.IsolatedAsyncioTestCase):
             agent._default_llm = original_default_llm
             agent.rag_search.search = original_search
 
+    async def test_run_analysis_with_audit_repairs_fenced_deep_context_json(self):
+        llm = SequenceLLM(
+            [
+                json.dumps(
+                    {
+                        "reasoning": "The code validates input before use.",
+                        "details": ["check allowlist"],
+                        "actions": ["validate input"],
+                        "logic_with_nlp": "Validate input against an allowlist before use.",
+                    }
+                )
+            ]
+        )
+        original_open_code_agent = agent.OpenCodeAgent
+        original_default_llm = agent._default_llm
+        original_search = agent.rag_search.search
+        SequenceOpenCodeAgent.responses = [
+            json.dumps(
+                {
+                    "reasoning": "The sanitizer still looks brittle once we compare it with known failure patterns.",
+                    "is_vuln": True,
+                    "confidence": "high",
+                    "evidence_summary": "The sanitizer still behaves like a brittle blacklist and warrants repo-aware confirmation.",
+                    "external_evidence_used": False,
+                    "external_evidence_sources": [],
+                    "external_evidence_reason": "standard 模式不会主动检索公开资料。",
+                }
+            ),
+            "```json\n"
+            "{\n"
+            '  "vulnerable_path": "POST dayFilter -> rawQuery($query)",\n'
+            '  "bypass_reasoning": "The value is concatenated into a numeric SQL context where escaping quotes is insufficient.",\n'
+            '  "poc": "POST /location_history/controllers/global.php\\n\\ndayFilter[]=1) OR 1=1 -- ",\n'
+            '  "is_vuln": true,\n'
+            '  "verdict": "confirmed"\n'
+            "}\n"
+            "```",
+        ]
+        SequenceOpenCodeAgent.instances = []
+
+        async def fake_search(**kwargs):
+            return []
+
+        agent.OpenCodeAgent = SequenceOpenCodeAgent
+        agent._default_llm = lambda: llm
+        agent.rag_search.search = fake_search
+
+        try:
+            with TemporaryDirectory() as tmp_dir:
+                repo_path = Path(tmp_dir) / "repo"
+                repo_path.mkdir()
+                audit_dir = Path(tmp_dir) / "audit"
+                result = await agent.run_analysis_with_audit(
+                    repo_path=str(repo_path),
+                    sanitizer_code="dangerous_filter(user_input)",
+                    audit_dir=audit_dir,
+                )
+
+                self.assertTrue((audit_dir / "05_deep_context_analysis.json").exists())
+                summary = json.loads((audit_dir / "audit_summary.json").read_text(encoding="utf-8"))
+                self.assertEqual(summary["status"], "success")
+                self.assertTrue(summary["deep_analysis_triggered"])
+                self.assertEqual(summary["final_verdict_source"], "deep_context_analysis")
+                self.assertEqual(result["deep_analysis"].verdict, "confirmed")
+                self.assertIn("dayFilter[]", result["result"].poc_text)
+        finally:
+            agent.OpenCodeAgent = original_open_code_agent
+            agent._default_llm = original_default_llm
+            agent.rag_search.search = original_search
+
     async def test_run_analysis_with_audit_preserves_fallback_result_when_deep_context_fails(self):
         llm = SequenceLLM(
             [
@@ -497,6 +567,92 @@ class BaseOpenCodeAgentTests(unittest.IsolatedAsyncioTestCase):
                     str(repo_path),
                 )
                 self.assertTrue(deep_stage["state"]["deep_analysis_skipped"])
+        finally:
+            agent.OpenCodeAgent = original_open_code_agent
+            agent._default_llm = original_default_llm
+            agent.rag_search.search = original_search
+
+    async def test_run_analysis_with_audit_preserves_fallback_result_when_deep_context_returns_text(self):
+        llm = SequenceLLM(
+            [
+                json.dumps(
+                    {
+                        "reasoning": "The sanitizer still looks like a brittle blacklist.",
+                        "details": ["replaces a narrow token set"],
+                        "actions": ["replace token", "return original data"],
+                        "logic_with_nlp": "Replace a narrow token set and then return the original attacker-controlled value.",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "reasoning": "The fallback analysis finds the blacklist incomplete.",
+                        "is_vuln": True,
+                        "confidence": "medium",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "reasoning": "Review confirms the sanitizer is still bypassable.",
+                        "is_real_vuln": True,
+                        "confidence": "high",
+                    }
+                ),
+            ]
+        )
+        original_open_code_agent = agent.OpenCodeAgent
+        original_default_llm = agent._default_llm
+        original_search = agent.rag_search.search
+
+        class FallbackThenDeepTextAgent:
+            call_count = 0
+
+            def __init__(self, project_path: str, model: str = None):
+                self.project_path = project_path
+                self.model = model
+
+            def chat(self, prompt: str) -> str:
+                self.__class__.call_count += 1
+                if self.__class__.call_count == 1:
+                    raise make_opencode_error("boom", self.project_path)
+                return (
+                    "Now let me read the complete source file to understand the full context:\n\n"
+                    "Now I have all the context needed. Let me verify the exploit logic with a quick Python test:"
+                )
+
+        async def fake_search(**kwargs):
+            return []
+
+        agent.OpenCodeAgent = FallbackThenDeepTextAgent
+        agent._default_llm = lambda: llm
+        agent.rag_search.search = fake_search
+
+        try:
+            with TemporaryDirectory() as tmp_dir:
+                repo_path = Path(tmp_dir) / "repo"
+                repo_path.mkdir()
+                audit_dir = Path(tmp_dir) / "audit"
+                result = await agent.run_analysis_with_audit(
+                    repo_path=str(repo_path),
+                    sanitizer_code="dangerous_filter(user_input)",
+                    audit_dir=audit_dir,
+                )
+
+                self.assertTrue((audit_dir / "07_deep_context_analysis.json").exists())
+                summary = json.loads((audit_dir / "audit_summary.json").read_text(encoding="utf-8"))
+                deep_stage = json.loads(
+                    (audit_dir / "07_deep_context_analysis.json").read_text(encoding="utf-8")
+                )
+
+                self.assertEqual(summary["status"], "success")
+                self.assertEqual(summary["final_verdict_source"], "review_result")
+                self.assertEqual(summary["final_verdict_source_detail"], "llm_fallback_review")
+                self.assertTrue(summary["deep_analysis_attempted"])
+                self.assertTrue(summary["deep_analysis_skipped"])
+                self.assertEqual(summary["deep_analysis_error"]["node"], "deep_context_analysis")
+                self.assertEqual(len(summary["recoverable_errors"]), 2)
+                self.assertTrue(deep_stage["node_output"]["fallback_triggered"])
+                self.assertEqual(deep_stage["node_output"]["error"]["type"], "OutputParserException")
+                self.assertIn("源码上下文深挖执行失败", result["result"].reasoning)
         finally:
             agent.OpenCodeAgent = original_open_code_agent
             agent._default_llm = original_default_llm
