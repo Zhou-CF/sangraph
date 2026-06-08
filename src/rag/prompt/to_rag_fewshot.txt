@@ -1,0 +1,209 @@
+## Few-shot Example 1: Blacklist-based XSS Check
+
+### Input Code
+```java
+if (string.toLowerCase().indexOf("<script") != -1) {
+    throw new IllegalArgumentException();
+}
+```
+
+### Output JSON
+```json
+{
+  "actions": [
+    "perform blacklist-based input validation",
+    "reject inputs containing a script tag pattern"
+  ],
+  "details": [
+    "convert the input string to lower case before inspection",
+    "search for the literal substring '<script' via indexOf",
+    "raise an exception when the substring is found"
+  ],
+  "sanitizer_logic_with_nlp": "Normalize the input to lower case and reject the request if the string contains the literal '<script' substring.",
+  "validation_api_list": [
+    "String.toLowerCase",
+    "String.indexOf"
+  ],
+  "unsafe_sanitizer_info": {
+    "缺陷原因": "该逻辑只拦截字面量 '<script'，属于非常狭窄的黑名单检查，无法覆盖其他 HTML/JavaScript 执行向量。",
+    "绕过原理": "攻击者可以使用不包含 '<script' 的载荷，例如带事件处理器的标签，或使用其他可执行上下文来绕过检查。",
+    "关键过滤点": [
+      "indexOf(\"<script\")"
+    ],
+    "涉及函数": [
+      "String.toLowerCase",
+      "String.indexOf"
+    ]
+  },
+  "programming_language": "Java",
+  "cwe_id": [
+    "CWE-79"
+  ]
+}
+```
+
+## Few-shot Example 2: Verification Exemption Policy
+
+### Input Code
+```ruby
+@@unverifiable_types = Set.new [:text, :json, :csv]
+```
+
+### Output JSON
+```json
+{
+  "actions": [
+    "define request formats exempt from verification",
+    "configure a verification bypass policy"
+  ],
+  "details": [
+    "create a Set of symbols representing exempt request formats",
+    "include :text in the unverifiable type set"
+  ],
+  "sanitizer_logic_with_nlp": "Define a set of request formats that are treated as exempt from verification, including the :text format.",
+  "validation_api_list": [
+    "Set.new"
+  ],
+  "unsafe_sanitizer_info": {
+    "缺陷原因": "该策略直接把某些格式加入豁免集合，导致这些请求类型不会进入预期的验证流程。",
+    "绕过原理": "攻击者可以构造属于豁免集合的请求格式，从而跳过验证逻辑。",
+    "关键过滤点": [
+      "membership in @@unverifiable_types",
+      "include :text in exempt formats"
+    ],
+    "涉及函数": [
+      "Set.new"
+    ]
+  },
+  "programming_language": "Ruby",
+  "cwe_id": [
+    "CWE-352"
+  ]
+}
+```
+
+## Few-shot Example 3: Path Boundary Validation
+
+### Input Code
+```python
+return data_path.startswith(root_path + os.sep)
+```
+
+### Output JSON
+```json
+{
+  "actions": [
+    "add path boundary validation",
+    "restrict file access to a root directory"
+  ],
+  "details": [
+    "compare the candidate path prefix against the authorized root path",
+    "append os.sep to avoid matching sibling prefixes"
+  ],
+  "sanitizer_logic_with_nlp": "Check that the candidate path starts with the authorized root directory prefix before allowing access.",
+  "validation_api_list": [
+    "str.startswith",
+    "os.sep"
+  ],
+  "unsafe_sanitizer_info": {
+    "缺陷原因": "仅依赖前缀比较通常缺少路径规范化和真实路径解析，容易在复杂路径场景中失效。",
+    "绕过原理": "如果输入路径在比较前未做规范化或解析，攻击者可能通过特殊路径形式绕过简单的前缀检查。",
+    "关键过滤点": [
+      "startswith(root_path + os.sep)"
+    ],
+    "涉及函数": [
+      "str.startswith"
+    ]
+  },
+  "programming_language": "Python",
+  "cwe_id": [
+    "CWE-22"
+  ]
+}
+```
+
+## Few-shot Example 4: Replace-and-Trim Sanitization
+
+### Input Code
+```php
+trim(str_replace([':', ' ', '-', '.', '0x'], '', $vars['address']))
+```
+
+### Output JSON
+```json
+{
+  "actions": [
+    "normalize address-like input",
+    "remove selected delimiters from user input"
+  ],
+  "details": [
+    "strip colon, space, dash, dot, and hex prefix tokens with str_replace",
+    "trim leading and trailing whitespace after replacement"
+  ],
+  "sanitizer_logic_with_nlp": "Normalize the input by removing selected delimiter characters and prefixes, then trim the resulting string.",
+  "validation_api_list": [
+    "str_replace",
+    "trim"
+  ],
+  "unsafe_sanitizer_info": {
+    "缺陷原因": "字符替换和裁剪只能改变输入外观，不能保证下游使用场景是安全的，尤其不能替代参数化或上下文正确编码。",
+    "绕过原理": "攻击者仍可利用未被处理的输入结构或下游拼接逻辑完成攻击，因为该逻辑并未建立严格的安全边界。",
+    "关键过滤点": [
+      "str_replace([...], '', input)",
+      "trim(...)"
+    ],
+    "涉及函数": [
+      "str_replace",
+      "trim"
+    ]
+  },
+  "programming_language": "PHP",
+  "cwe_id": [
+    "CWE-89"
+  ]
+}
+```
+
+## Few-shot Example 5: Header Control Character Check
+
+### Input Code
+```python
+if len(value) > 4000 or re.match(b(r"[\\x00-\\x1f]"), value):
+    raise ValueError()
+```
+
+### Output JSON
+```json
+{
+  "actions": [
+    "validate header value length",
+    "reject control characters in header input"
+  ],
+  "details": [
+    "enforce a maximum header length of 4000 bytes",
+    "use re.match to test whether the beginning of the value contains control characters",
+    "raise an exception when the validation fails"
+  ],
+  "sanitizer_logic_with_nlp": "Reject the header value if it exceeds the size limit or if the beginning of the value matches a control-character pattern.",
+  "validation_api_list": [
+    "len",
+    "re.match"
+  ],
+  "unsafe_sanitizer_info": {
+    "缺陷原因": "该检查只验证字符串开头是否包含控制字符，无法覆盖出现在后续位置的危险换行或分隔符。",
+    "绕过原理": "攻击者可以把危险控制字符放在字符串后部，从而绕过只检查开头的匹配逻辑。",
+    "关键过滤点": [
+      "len(value) > 4000",
+      "re.match(control-character-regex, value)"
+    ],
+    "涉及函数": [
+      "len",
+      "re.match"
+    ]
+  },
+  "programming_language": "Python",
+  "cwe_id": [
+    "CWE-113"
+  ]
+}
+```

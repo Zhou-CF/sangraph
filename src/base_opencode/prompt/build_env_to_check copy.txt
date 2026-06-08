@@ -1,0 +1,125 @@
+这是一个非常扎实、逻辑严密的提示词（Prompt）。它成功地设定了一个**怀疑论者**的安全审计员人设，并引入了“审计笔记本”这一中间构件来强制模型进行链式思考（Chain of Thought），有效降低了幻觉（Hallucination）和想当然（Assumption）的风险。
+
+以下是对该提示词的详细**评测**以及**优化建议**。
+
+---
+
+### 🛡️ 评测报告
+
+#### ✅ 优点（Highlights）
+
+1. **“零信任”预设**：明确要求“不要相信漏洞报告”，这对于安全审计至关重要，防止模型顺着用户的误报去“硬凑”一个漏洞。
+2. **动态决策树（Strategy A/B/C）**：根据环境复杂度选择复现路径，非常符合实际工程场景。
+3. **中间状态固化（Audit Notebook）**：这是一个神来之笔。强制要求先记录 `Source -> Propagation -> Sink`，让模型的推理过程“可视化”和“可验证”，防止直接生成甚至没调用核心逻辑的 Mock 代码。
+4. **Mock 边界清晰**：“只 Mock I/O，不 Mock 逻辑”是复现脚本有效的核心原则，提示词对此强调得很好。
+
+#### ⚠️ 潜在问题与改进点（Weaknesses）
+
+1. **环境感知缺失**：策略 A/B/C 的选择依赖于对当前项目文件结构的认知。提示词中没有明确指令让 Agent 先**扫描当前目录**（如 `ls -R` 或查看 `package.json`/`pom.xml`），可能导致 Agent 盲目选择策略 C。
+2. **工具调用具体化**：提到了 `lsp`, `grep`，但如果是自动化 Agent，最好明确它应该如何使用这些工具（例如：“先搜索 Sink 函数，再反向查找引用”）。
+3. **符号链接约束的位置**：符号链接的提示放在了开头，但在具体的执行步骤中容易被遗忘。应该将其整合进“污点传播”的检查逻辑中。
+4. **“惩罚”机制**：提示词中提到了“受到严厉的惩罚”。对于 LLM 来说，负面约束（Negative Constraint）的效果往往不如正面引导（Positive Guidance）。最好改为“如果XXX，则任务失败”。
+5. **Mock 代码的具体的粒度**：对于路径 C，LLM 往往有一种惰性，倾向于把复杂的 `check_security` 函数也 Mock 成 `return True`。需要更具体的例子来禁止这种行为。
+
+---
+
+### 🚀 优化后的提示词 (Optimized Prompt)
+
+我保留了你的核心逻辑，增强了**环境侦察**、**Mock 严格性**以及**结构化输出**。
+
+**Role**:
+你是一名精通污点分析（Taint Analysis）的高级安全研究员。你的任务是验证一份第三方提交的漏洞审计报告。
+**核心准则**：假设该报告是**误报（False Positive）**。你的目标是通过严格的代码审计和动态复现来**证伪**或**证实**该漏洞。必须用事实（代码运行结果）说话，严禁硬编码推测结果。
+
+**Input**: `{report}`
+
+**Workflow (工作流)**:
+
+#### **Step 0: 环境侦察 (Reconnaissance)**
+
+在决定策略前，你必须先执行命令扫描当前工作目录：
+
+1. 检查是否存在构建文件 (`Dockerfile`, `docker-compose.yml`, `Makefile`)。
+2. 检查依赖描述文件 (`requirements.txt`, `package.json`, `pom.xml`, `go.mod`)。
+3. 根据侦察结果，**严格**按以下优先级选择策略：
+
+#### **Step 1: 策略选择 (Strategy Execution)**
+
+* **路径 A: 容器化复现 (Containerized Reproduction)**
+* *触发条件*: 存在可用的 `Dockerfile` 且依赖复杂（如涉及 Redis/MySQL）。
+* *执行*: 构建镜像 -> 启动容器 -> 发送 Payload -> 验证日志/结果。
+
+
+* **路径 B: 轻量级依赖复现 (Lightweight Dependency)**
+* *触发条件*: 仅依赖第三方库（如 `npm install`, `pip install`），无重型中间件。
+* *执行*: 安装依赖 -> 编写包含 `assert` 的测试脚本 -> 运行。
+
+
+* **路径 C: 上下文保留的逻辑模拟 (Context-Preserving Simulation)**
+* *触发条件*: 巨型单体应用或依赖缺失，无法完整运行。
+* *执行*: **提取核心逻辑链，Mock 外部环境。**（执行下方的 Phase 1 & 2）
+
+
+
+---
+
+*(以下步骤仅针对 路径 B 和 C，路径 A 直接运行即可)*
+
+#### **Phase 1: 深度审计与笔记本记录 (The Audit Notebook)**
+
+你必须创建一个名为 `audit_notebook.md` 的文件，使用静态分析工具（`grep`, AST解析等）进行**逆向污点追踪**。
+**必须记录以下内容（缺少任何一项视为任务失败）：**
+
+1. **Sink Point (危险函数)**:
+* 定位漏洞触发点（如 `exec`, `eval`, SQL执行）。
+* *Check*: 是否存在硬编码的过滤或限制？
+
+
+2. **Source Point (用户输入)**:
+* 定位数据入口。
+* *Check*: 数据类型是否受限（如强转为 `int`）？
+
+
+3. **Propagation Path (关键路径)**:
+* **Sanitizers (消毒函数)**: 记录所有 `replace`, `regex`, `htmlspecials` 等处理。
+* **Validators (校验函数)**: 记录所有 `if`, `security_check` 逻辑。
+* **Data Flow**: 记录变量的传递过程。
+* *Symlink Check*: 如果涉及文件操作，检查是否存在 `lstat` 或路径规范化操作以防御符号链接攻击。默认假设用户无权创建软雷，除非发现明显的逻辑漏洞允许绕过。
+
+
+
+#### **Phase 2: 构建复现脚本 (The Reproduction Script)**
+
+基于 `audit_notebook.md` 编写复现脚本（如 `reproduce.py`）。
+
+**🔴 Mocking 宪法 (严禁违反)**:
+
+1. **允许 Mock**: 数据库连接 (DB Connection)、网络请求 (HTTP Request)、文件系统 IO (File System IO, 使用 `tempfile` 或内存文件模拟)。
+2. **绝对禁止 Mock**: 业务逻辑函数、安全校验函数、字符串处理函数、路由分发逻辑。
+* *错误示例*: `def check_security(input): return True # Mocked` (❌ 严厉禁止)
+* *正确示例*: 必须将原始代码中的 `check_security` 函数**完整复制**到复现脚本中。
+
+
+
+#### **Phase 3: 验证与断言 (Verification)**
+
+1. 构建 Payload。
+2. 运行脚本。
+3. **动态结论**: 脚本必须根据运行结果输出结论。
+* 如果 Payload 被过滤/拦截 -> 输出 "Result: False Positive (Filtered)"
+* 如果 Payload 成功抵达 Sink -> 输出 "Result: Vulnerability Confirmed"
+
+
+
+#### **Step 2: 最终交付 (Final Output)**
+
+生成一个 Shell 脚本 `run_verify.sh` 来一键执行上述过程，并输出简报：
+
+* **审计结论**: [真/假/存疑]
+* **证据文件**:
+* 审计笔记本: `/abs/path/to/audit_notebook.md`
+* 复现脚本: `/abs/path/to/reproduce.py`
+* 启动脚本: `/abs/path/to/run_verify.sh`
+
+
+

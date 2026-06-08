@@ -1,0 +1,183 @@
+From d4005b63d310a4fdf5aec3d4b7db65a4ec424d13 Mon Sep 17 00:00:00 2001
+From: Ben Humphreys <behumphreys@atlassian.com>
+Date: Mon, 19 Sep 2022 14:13:27 +1000
+Subject: [PATCH 1/3] Null injection hardening
+
+In NuProcessBuilder throw an IllegalArgumentException if commands that
+include a null character are passed. This hardens against command line
+injection type attacks in applications that use NuProcess. Throwing a
+IllegalArgumentException is what Java's ProcessBuilder does when nulls
+are passed so this solution was chosen to maintain some consistency with
+that.
+---
+ .../com/zaxxer/nuprocess/NuProcessBuilder.java     | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/src/main/java/com/zaxxer/nuprocess/NuProcessBuilder.java b/src/main/java/com/zaxxer/nuprocess/NuProcessBuilder.java
+index d0276ecb..ae4c4903 100644
+--- a/src/main/java/com/zaxxer/nuprocess/NuProcessBuilder.java
++++ b/src/main/java/com/zaxxer/nuprocess/NuProcessBuilder.java
+@@ -107,6 +107,7 @@ public NuProcessBuilder(List<String> commands, Map<String, String> environment)
+       if (commands == null || commands.isEmpty()) {
+          throw new IllegalArgumentException("List of commands may not be null or empty");
+       }
++      ensureNoNullCharacters(commands);
+ 
+       this.environment = new TreeMap<String, String>(environment);
+       this.command = new ArrayList<String>(commands);
+@@ -126,6 +127,7 @@ public NuProcessBuilder(List<String> commands)
+       if (commands == null || commands.isEmpty()) {
+          throw new IllegalArgumentException("List of commands may not be null or empty");
+       }
++      ensureNoNullCharacters(commands);
+ 
+       this.environment = new TreeMap<String, String>(System.getenv());
+       this.command = new ArrayList<String>(commands);
+@@ -144,9 +146,11 @@ public NuProcessBuilder(String... commands)
+       if (commands == null || commands.length == 0) {
+          throw new IllegalArgumentException("List of commands may not be null or empty");
+       }
++      List<String> commandsList = Arrays.asList(commands);
++      ensureNoNullCharacters(commandsList);
+ 
+       this.environment = new TreeMap<String, String>(System.getenv());
+-      this.command = new ArrayList<String>(Arrays.asList(commands));
++      this.command = new ArrayList<String>(commandsList);
+    }
+ 
+    /**
+@@ -280,6 +284,14 @@ private void ensureListener()
+       }
+    }
+ 
++   private void ensureNoNullCharacters(List<String> commands) {
++      for (String command : commands) {
++         if (command.indexOf('\u0000') >= 0) {
++            throw new IllegalArgumentException("Commands may not contain null characters");
++         }
++      }
++   }
++
+    private String[] prepareEnvironment()
+    {
+       String[] env = new String[environment.size()];
+
+From fabf505576129d42357a67184bd7f44d386928ea Mon Sep 17 00:00:00 2001
+From: Ben Humphreys <behumphreys@atlassian.com>
+Date: Mon, 19 Sep 2022 15:52:16 +1000
+Subject: [PATCH 2/3] Null injection hardening (Rework)
+
+Moves the ensureNoNullCharacters() out of the constructors and in to
+run() and start(). Since it is possible to mutate the list returned by
+NuProcessBuilder.command() a constructor only based approach to
+validation is insufficient to catch all cases.
+---
+ src/main/java/com/zaxxer/nuprocess/NuProcessBuilder.java | 8 +++-----
+ 1 file changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/src/main/java/com/zaxxer/nuprocess/NuProcessBuilder.java b/src/main/java/com/zaxxer/nuprocess/NuProcessBuilder.java
+index ae4c4903..890cfc1e 100644
+--- a/src/main/java/com/zaxxer/nuprocess/NuProcessBuilder.java
++++ b/src/main/java/com/zaxxer/nuprocess/NuProcessBuilder.java
+@@ -107,7 +107,6 @@ public NuProcessBuilder(List<String> commands, Map<String, String> environment)
+       if (commands == null || commands.isEmpty()) {
+          throw new IllegalArgumentException("List of commands may not be null or empty");
+       }
+-      ensureNoNullCharacters(commands);
+ 
+       this.environment = new TreeMap<String, String>(environment);
+       this.command = new ArrayList<String>(commands);
+@@ -127,7 +126,6 @@ public NuProcessBuilder(List<String> commands)
+       if (commands == null || commands.isEmpty()) {
+          throw new IllegalArgumentException("List of commands may not be null or empty");
+       }
+-      ensureNoNullCharacters(commands);
+ 
+       this.environment = new TreeMap<String, String>(System.getenv());
+       this.command = new ArrayList<String>(commands);
+@@ -146,11 +144,9 @@ public NuProcessBuilder(String... commands)
+       if (commands == null || commands.length == 0) {
+          throw new IllegalArgumentException("List of commands may not be null or empty");
+       }
+-      List<String> commandsList = Arrays.asList(commands);
+-      ensureNoNullCharacters(commandsList);
+ 
+       this.environment = new TreeMap<String, String>(System.getenv());
+-      this.command = new ArrayList<String>(commandsList);
++      this.command = new ArrayList<String>(Arrays.asList(commands));
+    }
+ 
+    /**
+@@ -257,6 +253,7 @@ public void setCwd(Path cwd)
+     */
+    public NuProcess start()
+    {
++      ensureNoNullCharacters(command);
+       ensureListener();
+       String[] env = prepareEnvironment();
+ 
+@@ -271,6 +268,7 @@ public NuProcess start()
+     */
+    public void run()
+    {
++      ensureNoNullCharacters(command);
+       ensureListener();
+       String[] env = prepareEnvironment();
+ 
+
+From 467b28a2d9a92a1e5b12b3bdcdc7e21e1fdbe433 Mon Sep 17 00:00:00 2001
+From: Ben Humphreys <behumphreys@atlassian.com>
+Date: Mon, 19 Sep 2022 17:12:13 +1000
+Subject: [PATCH 3/3] Null injection hardening (Adds tests)
+
+---
+ .../java/com/zaxxer/nuprocess/RunTest.java    | 29 +++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/src/test/java/com/zaxxer/nuprocess/RunTest.java b/src/test/java/com/zaxxer/nuprocess/RunTest.java
+index f9cdf32f..5207ddd0 100644
+--- a/src/test/java/com/zaxxer/nuprocess/RunTest.java
++++ b/src/test/java/com/zaxxer/nuprocess/RunTest.java
+@@ -316,6 +316,32 @@ public void softCloseStdinAfterWrite()
+       System.err.println("Completed test softCloseStdinAfterWrite()");
+    }
+ 
++   @Test(expected = IllegalArgumentException.class)
++   public void nullCommandViaCommandMutationWithRun() {
++      NuProcessBuilder pb = new NuProcessBuilder(new NullProcessHandler(), command);
++      pb.command().add("--foo\0--bar");
++      pb.run();
++   }
++
++   @Test(expected = IllegalArgumentException.class)
++   public void nullCommandViaCommandMutationWithStart() {
++      NuProcessBuilder pb = new NuProcessBuilder(new NullProcessHandler(), command);
++      pb.command().add("--foo\0--bar");
++      pb.start();
++   }
++
++   @Test(expected = IllegalArgumentException.class)
++   public void nullCommandViaConstructorWithRun() {
++      NuProcessBuilder pb = new NuProcessBuilder(new NullProcessHandler(), command, "--foo\0--bar");
++      pb.run();
++   }
++
++   @Test(expected = IllegalArgumentException.class)
++   public void nullCommandViaConstructorWithStart() {
++      NuProcessBuilder pb = new NuProcessBuilder(new NullProcessHandler(), command, "--foo\0--bar");
++      pb.start();
++   }
++
+    private static byte[] getLotsOfBytes()
+    {
+       StringBuilder sb = new StringBuilder();
+@@ -395,6 +421,9 @@ boolean checkAdlers()
+       }
+    }
+ 
++   private static class NullProcessHandler extends NuAbstractProcessHandler {
++   }
++
+    private static class Utf8DecodingListener extends NuAbstractCharsetHandler
+    {
+       private final CharBuffer utf8Buffer;

@@ -1,0 +1,83 @@
+
+# Role
+你是一名资深的代码审计与安全分析专家。你的任务是将给定的代码片段（通常涉及数据清洗、输入验证、安全防御或漏洞修复）转化为结构化的 JSON 格式。
+
+# Goal
+分析代码的逻辑意图，将其拆解为高层的“动作”、底层的“细节”，并生成一段流畅的中文自然语言描述。
+
+# JSON Output Format
+请严格遵守以下 JSON 结构：
+{format_instructions}
+
+# Guidelines
+
+1. **Actions (动作)**: 使用英语。动词开头，描述代码的**意图**或**高层行为**。不要涉及具体变量名，关注“做了什么”（如验证、清洗、拦截、构建）。
+2. **Details (细节)**: 使用英语。描述具体的**实现方式**。提及关键的函数名（如 `str_replace`, `startswith`）、特定的变量检查或具体的逻辑条件。
+3. **Sanitizer_logic_with_nlp (自然语言逻辑)**: 使用**英文**。将 Actions 和 Details 结合，生成一段通顺的描述。
+* 格式通常为：“通过 [手段/细节] 来 [目的/动作]，从而 [结果/防御效果]”。
+* 必须客观描述代码逻辑。如果代码是漏洞修复，描述它是如何防御的；如果代码是有漏洞的（如不安全的拼接），描述它是如何处理数据并导致风险的。
+
+
+
+# Examples
+
+## Example 1 (Path Traversal Fix)
+
+**Input Code:**
+
+```python
+return data_path.startswith(root_path + os.sep)
+
+```
+
+**Output:**
+
+```json
+{{
+    "details": [
+        "verify that data_path starts with the authorized root_path directory",
+        "ensure proper path separator (os.sep) is used for cross-platform compatibility"
+    ],
+    "actions": [
+        "add path traversal validation",
+        "implement directory boundary check",
+        "prevent unauthorized file access"
+    ],
+    "sanitizer_logic_with_nlp": "Prevent path traversal attacks by checking the path prefix to ensure that file access does not override to directories outside the root path"
+}}
+
+```
+
+## Example 2 (Unsafe SQL Construction)
+
+**Input Code:**
+
+```php
+$sql .= " WHERE ... LIKE '%" . trim(str_replace([':', ' ', '-', '.', '0x'], '', $vars['address'])) . "%' $where ";
+
+```
+
+**Output:**
+
+```json
+{{
+    "details": [
+        "remove specific delimiters (colon, space, dash, dot) and hex prefix ('0x') from the input string via str_replace",
+        "trim whitespace from the beginning and end of the string",
+        "concatenate the sanitized string directly into a SQL LIKE clause with wildcards"
+    ],
+    "actions": [
+        "perform character replacement sanitization",
+        "normalize MAC address input",
+        "construct SQL query via concatenation"
+    ],
+    "sanitizer_logic_with_nlp": "Clean the input data by removing common MAC address separators (such as colons, hyphens, and dots) and prefixes, and directly embed the processed string into the SQL query statement in a concatenated manner for fuzzy matching"
+}}
+
+```
+
+# Task
+
+请分析以下代码片段并输出 JSON：
+
+{defense_code_content}

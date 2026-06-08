@@ -1,0 +1,59 @@
+From 940134edbac7350f9994320c6ea3c5d889adba68 Mon Sep 17 00:00:00 2001
+From: Stanislav Laznicka <slaznick@redhat.com>
+Date: Wed, 16 Nov 2022 11:09:22 +0100
+Subject: [PATCH] sccadmission: use the actual pod/container seccomp profile to
+ match SCC
+
+---
+ .../seccomp/strategy.go                           |  4 ++--
+ .../seccomp/strategy_test.go                      | 15 +++++++++++++++
+ 2 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/pkg/securitycontextconstraints/seccomp/strategy.go b/pkg/securitycontextconstraints/seccomp/strategy.go
+index fdbf4cd46..8886bd0d1 100644
+--- a/pkg/securitycontextconstraints/seccomp/strategy.go
++++ b/pkg/securitycontextconstraints/seccomp/strategy.go
+@@ -141,8 +141,8 @@ func (s *strategy) validateProfile(fldPath *field.Path, profile string) *field.E
+ 		// This means that we now have to automatically allow `runtime/default`
+ 		// if a user specifies `docker/default` and vice versa in an SCC.
+ 		if s.runtimeDefaultAllowed &&
+-			(p == v1.DeprecatedSeccompProfileDockerDefault ||
+-				p == v1.SeccompProfileRuntimeDefault) {
++			(profile == v1.DeprecatedSeccompProfileDockerDefault ||
++				profile == v1.SeccompProfileRuntimeDefault) {
+ 			return nil
+ 		}
+ 	}
+diff --git a/pkg/securitycontextconstraints/seccomp/strategy_test.go b/pkg/securitycontextconstraints/seccomp/strategy_test.go
+index af453b59c..333c15008 100644
+--- a/pkg/securitycontextconstraints/seccomp/strategy_test.go
++++ b/pkg/securitycontextconstraints/seccomp/strategy_test.go
+@@ -220,6 +220,11 @@ func TestValidatePod(t *testing.T) {
+ 			pod:             newPod("docker/default", nil),
+ 			expectedMsg:     "",
+ 		},
++		"specific profile does not allow any other profiles": {
++			allowedProfiles: []string{"runtime/default"},
++			pod:             newPod("", &api.SeccompProfile{Type: api.SeccompProfileTypeUnconfined}),
++			expectedMsg:     "unconfined is not an allowed seccomp profile. Valid values are [runtime/default]",
++		},
+ 	}
+ 
+ 	for name, tc := range tests {
+@@ -325,6 +330,16 @@ func TestValidateContainer(t *testing.T) {
+ 			}),
+ 			expectedMsg: "Forbidden: localhost/bar is not an allowed seccomp profile. Valid values are [localhost/foo]",
+ 		},
++		"runtime/default allows the profile of that type": {
++			allowedProfiles: []string{"runtime/default"},
++			pod:             newPod("", &api.SeccompProfile{Type: api.SeccompProfileTypeRuntimeDefault}),
++			expectedMsg:     "",
++		},
++		"specific profile does not allow any other profiles": {
++			allowedProfiles: []string{"runtime/default"},
++			pod:             newPod("", &api.SeccompProfile{Type: api.SeccompProfileTypeUnconfined}),
++			expectedMsg:     "unconfined is not an allowed seccomp profile. Valid values are [runtime/default]",
++		},
+ 	}
+ 
+ 	for name, tc := range tests {

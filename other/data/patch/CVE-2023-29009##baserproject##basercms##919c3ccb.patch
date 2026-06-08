@@ -1,0 +1,53 @@
+From 919c3ccbbd7a2432967dcb2e428131cc7ad71bb2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E3=82=B4=E3=83=B3=E3=83=89=E3=83=BC?=
+ <gondoh@catchup.co.jp>
+Date: Thu, 26 Oct 2023 12:19:32 +0900
+Subject: [PATCH] Merge pull request from GHSA-8vqx-prq4-rqrq
+
+---
+ app/webroot/theme/admin-third/Users/admin/form.php | 9 ++++++++-
+ lib/Baser/View/Users/admin/form.php                | 9 ++++++++-
+ 2 files changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/app/webroot/theme/admin-third/Users/admin/form.php b/app/webroot/theme/admin-third/Users/admin/form.php
+index 69b170523f..d3cbca811e 100755
+--- a/app/webroot/theme/admin-third/Users/admin/form.php
++++ b/app/webroot/theme/admin-third/Users/admin/form.php
+@@ -173,8 +173,15 @@ class="helptext"><?php echo sprintf(__d('baser', 'ユーザーグループごと
+ 		<?php if ($this->request->data['Favorite']): ?>
+ 			<ul class="bca-list" data-bca-list-layout="horizon" id="DefaultFavorites">
+ 				<?php foreach($this->request->data['Favorite'] as $key => $favorite): ?>
++					<?php
++					// JavaScriptのリンクは除外
++					$link = $favorite['url'];
++					if (preg_match('/\A\s*?javascript\s*:/i', $link)) {
++						$link = '';
++					}
++					?>
+ 					<li class="bca-list__item">
+-						<?php $this->BcBaser->link($favorite['name'], $favorite['url'], ['escape' => true]) ?>
++						<?php $this->BcBaser->link($favorite['name'], $link, ['escape' => true]) ?>
+ 						<?php echo $this->BcForm->input('Favorite.name.' . $key, ['type' => 'hidden', 'value' => $favorite['name'], 'class' => 'favorite-name']) ?>
+ 						<?php echo $this->BcForm->input('Favorite.url.' . $key, ['type' => 'hidden', 'value' => $favorite['url'], 'class' => 'favorite-url']) ?>
+ 					</li>
+diff --git a/lib/Baser/View/Users/admin/form.php b/lib/Baser/View/Users/admin/form.php
+index c82a6dd4d4..55932f9d29 100755
+--- a/lib/Baser/View/Users/admin/form.php
++++ b/lib/Baser/View/Users/admin/form.php
+@@ -165,8 +165,15 @@ class="helptext"> <?php echo sprintf(__d('baser', 'ユーザーグループご
+ 		<?php if ($this->request->data['Favorite']): ?>
+ 			<ul class="clearfix" id="DefaultFavorites">
+ 				<?php foreach($this->request->data['Favorite'] as $key => $favorite): ?>
++					<?php
++					// JavaScriptのリンクは除外
++					$link = $favorite['url'];
++					if (preg_match('/\A\s*?javascript\s*:/i', $link)) {
++						$link = '';
++					}
++					?>
+ 					<li style="float:left">
+-						<?php $this->BcBaser->link(h($favorite['name']), $favorite['url']) ?>
++						<?php $this->BcBaser->link($favorite['name'], $link, ['escape' => true]) ?>
+ 						<?php echo $this->BcForm->input('Favorite.name.' . $key, ['type' => 'hidden', 'value' => $favorite['name'], 'class' => 'favorite-name']) ?>
+ 						<?php echo $this->BcForm->input('Favorite.url.' . $key, ['type' => 'hidden', 'value' => $favorite['url'], 'class' => 'favorite-url']) ?>
+ 					</li>

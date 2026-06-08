@@ -1,0 +1,4 @@
+interface:
+  display_name: "Vulnerability Verification"
+  short_description: "Verify vulnerabilities from analysis reports"
+  default_prompt: "Use $vuln-verification to validate a vulnerability report against the local source tree."

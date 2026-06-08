@@ -1,0 +1,36 @@
+{
+  "input_path": "data/verified_sanitizer_dataset.jsonl",
+  "output_path": "data/verified_sanitizer_dataset.regex_strict.jsonl",
+  "summary_output": "data/verified_sanitizer_dataset.regex_strict.summary.json",
+  "input_record_count": 713,
+  "output_record_count": 144,
+  "match_rule_counts": {
+    "preg": 72,
+    "regex_word": 82,
+    "python_re": 7,
+    "pattern": 13,
+    "java_replaceAll": 13
+  },
+  "sample_cves": [
+    "CVE-2010-2230",
+    "CVE-2011-2932",
+    "CVE-2012-2374",
+    "CVE-2012-3446",
+    "CVE-2012-3508",
+    "CVE-2012-3536",
+    "CVE-2012-6121",
+    "CVE-2012-6708",
+    "CVE-2013-2093",
+    "CVE-2013-3239",
+    "CVE-2013-5576",
+    "CVE-2014-3829",
+    "CVE-2014-4657",
+    "CVE-2014-8336",
+    "CVE-2014-9219",
+    "CVE-2014-9701",
+    "CVE-2015-1169",
+    "CVE-2015-1561",
+    "CVE-2015-8685",
+    "CVE-2015-8771"
+  ]
+}

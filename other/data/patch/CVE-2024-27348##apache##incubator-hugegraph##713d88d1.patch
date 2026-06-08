@@ -1,0 +1,897 @@
+From 713d88d1fd9953c3c3e3f130389501910ba40e1d Mon Sep 17 00:00:00 2001
+From: imbajin <jin@apache.org>
+Date: Thu, 21 Mar 2024 16:41:05 +0800
+Subject: [PATCH] refact: enhance auth logic
+
+fix
+---
+ README.md                                     |  14 +-
+ .../apache/hugegraph/api/auth/LoginAPI.java   |   9 +-
+ .../api/filter/AuthenticationFilter.java      |   8 +-
+ .../api/gremlin/GremlinQueryAPI.java          |   5 +-
+ .../hugegraph/auth/HugeFactoryAuthProxy.java  |  56 +++++--
+ .../security/HugeSecurityManager.java         | 155 +++++++++---------
+ .../org/apache/hugegraph/util/Reflection.java |  54 +++---
+ .../assembly/static/bin/hugegraph-server.sh   |   1 +
+ .../src/main/resources/log4j2.xml             |   2 +-
+ .../unit/core/SecurityManagerTest.java        |  47 ++++--
+ pom.xml                                       |   2 +-
+ 11 files changed, 201 insertions(+), 152 deletions(-)
+
+diff --git a/README.md b/README.md
+index 64c86a02bd..61930248a5 100644
+--- a/README.md
++++ b/README.md
+@@ -36,7 +36,8 @@ achieved through [Gremlin](https://tinkerpop.apache.org/gremlin.html)(a powerful
+ 
+ We can use `docker run -itd --name=graph -p 8080:8080 hugegraph/hugegraph` to quickly start an inner 
+ HugeGraph server with `RocksDB` (in backgrounds) for **test/dev**.
+-You can visit [doc page](https://hugegraph.apache.org/docs/quickstart/hugegraph-server/#3-deploy) or the [README](hugegraph-server/hugegraph-dist/docker/READEME.md) for more details.
++You can visit [doc page](https://hugegraph.apache.org/docs/quickstart/hugegraph-server/#3-deploy) or
++the [README](hugegraph-server/hugegraph-dist/docker/READEME.md) for more details. ([Docker Compose](./hugegraph-server/hugegraph-dist/docker/example))
+ 
+ > Note:
+ >  
+@@ -58,12 +59,11 @@ The project [doc page](https://hugegraph.apache.org/docs/) contains more informa
+ and provides detailed documentation for users. (Structure / Usage / API / Configs...)
+ 
+ And here are links of other **HugeGraph** component/repositories:
+-1. [hugegraph-toolchain](https://github.com/apache/incubator-hugegraph-toolchain) (graph tools **[loader](https://github.com/apache/incubator-hugegraph-toolchain/tree/master/hugegraph-loader)/[dashboard](https://github.com/apache/incubator-hugegraph-toolchain/tree/master/hugegraph-hubble)/[tool](https://github.com/apache/incubator-hugegraph-toolchain/tree/master/hugegraph-tools)/[client](https://github.com/apache/incubator-hugegraph-toolchain/tree/master/hugegraph-client)**)
+-2. [hugegraph-computer](https://github.com/apache/incubator-hugegraph-computer) (integrated **graph computing** system)
+-3. [hugegraph-commons](https://github.com/apache/incubator-hugegraph-commons) (**common & rpc** libs)
+-4. [hugegraph-website](https://github.com/apache/incubator-hugegraph-doc) (**doc & website** code)
+-
+-
++1. [hugegraph-toolchain](https://github.com/apache/hugegraph-toolchain) (graph tools **[loader](https://github.com/apache/incubator-hugegraph-toolchain/tree/master/hugegraph-loader)/[dashboard](https://github.com/apache/incubator-hugegraph-toolchain/tree/master/hugegraph-hubble)/[tool](https://github.com/apache/incubator-hugegraph-toolchain/tree/master/hugegraph-tools)/[client](https://github.com/apache/incubator-hugegraph-toolchain/tree/master/hugegraph-client)**)
++2. [hugegraph-computer](https://github.com/apache/hugegraph-computer) (integrated **graph computing** system)
++3. [hugegraph-commons](https://github.com/apache/hugegraph-commons) (**common & rpc** libs)
++4. [hugegraph-website](https://github.com/apache/hugegraph-doc) (**doc & website** code)
++5. [hugegraph-ai](https://github.com/apache/incubator-hugegraph-ai) (integrated **Graph AI/LLM/KG** system)
+ 
+ ## License
+ 
+diff --git a/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/auth/LoginAPI.java b/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/auth/LoginAPI.java
+index 74af573e39..50bf1a78de 100644
+--- a/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/auth/LoginAPI.java
++++ b/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/auth/LoginAPI.java
+@@ -84,8 +84,7 @@ public String login(@Context GraphManager manager, @PathParam("graph") String gr
+     @Status(Status.OK)
+     @Consumes(APPLICATION_JSON)
+     @Produces(APPLICATION_JSON_WITH_CHARSET)
+-    public void logout(@Context GraphManager manager,
+-                       @PathParam("graph") String graph,
++    public void logout(@Context GraphManager manager, @PathParam("graph") String graph,
+                        @HeaderParam(HttpHeaders.AUTHORIZATION) String auth) {
+         E.checkArgument(StringUtils.isNotEmpty(auth),
+                         "Request header Authorization must not be null");
+@@ -105,10 +104,8 @@ public void logout(@Context GraphManager manager,
+     @Status(Status.OK)
+     @Consumes(APPLICATION_JSON)
+     @Produces(APPLICATION_JSON_WITH_CHARSET)
+-    public String verifyToken(@Context GraphManager manager,
+-                              @PathParam("graph") String graph,
+-                              @HeaderParam(HttpHeaders.AUTHORIZATION)
+-                              String token) {
++    public String verifyToken(@Context GraphManager manager, @PathParam("graph") String graph,
++                              @HeaderParam(HttpHeaders.AUTHORIZATION) String token) {
+         E.checkArgument(StringUtils.isNotEmpty(token),
+                         "Request header Authorization must not be null");
+         LOG.debug("Graph [{}] get user: {}", graph, token);
+diff --git a/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/filter/AuthenticationFilter.java b/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/filter/AuthenticationFilter.java
+index b15adf3b90..f1829e7020 100644
+--- a/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/filter/AuthenticationFilter.java
++++ b/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/filter/AuthenticationFilter.java
+@@ -259,8 +259,7 @@ private boolean matchPermission(String required) {
+ 
+             if (LOG.isDebugEnabled()) {
+                 LOG.debug("Verify permission {} {} for user '{}' with role {}",
+-                          requiredPerm.action().string(),
+-                          requiredPerm.resourceObject(),
++                          requiredPerm.action().string(), requiredPerm.resourceObject(),
+                           this.user.username(), this.user.role());
+             }
+ 
+@@ -269,9 +268,8 @@ private boolean matchPermission(String required) {
+ 
+             if (!valid && LOG.isInfoEnabled() &&
+                 !required.equals(HugeAuthenticator.USER_ADMIN)) {
+-                LOG.info("User '{}' is denied to {} {}",
+-                         this.user.username(), requiredPerm.action().string(),
+-                         requiredPerm.resourceObject());
++                LOG.info("User '{}' is denied to {} {}", this.user.username(),
++                         requiredPerm.action().string(), requiredPerm.resourceObject());
+             }
+             return valid;
+         }
+diff --git a/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/gremlin/GremlinQueryAPI.java b/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/gremlin/GremlinQueryAPI.java
+index ad4a6452b5..1f35da5f1c 100644
+--- a/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/gremlin/GremlinQueryAPI.java
++++ b/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/gremlin/GremlinQueryAPI.java
+@@ -37,8 +37,7 @@
+ public class GremlinQueryAPI extends API {
+ 
+     private static final Set<String> FORBIDDEN_REQUEST_EXCEPTIONS =
+-            ImmutableSet.of("java.lang.SecurityException",
+-                            "jakarta.ws.rs.ForbiddenException");
++            ImmutableSet.of("java.lang.SecurityException", "jakarta.ws.rs.ForbiddenException");
+     private static final Set<String> BAD_REQUEST_EXCEPTIONS = ImmutableSet.of(
+             "java.lang.IllegalArgumentException",
+             "java.util.concurrent.TimeoutException",
+@@ -56,6 +55,7 @@ public GremlinClient client() {
+         if (this.client != null) {
+             return this.client;
+         }
++
+         HugeConfig config = this.configProvider.get();
+         String url = config.get(ServerOptions.GREMLIN_SERVER_URL);
+         int timeout = config.get(ServerOptions.GREMLIN_SERVER_TIMEOUT) * 1000;
+@@ -100,6 +100,7 @@ private static boolean matchBadRequestException(String exClass) {
+         if (exClass == null) {
+             return false;
+         }
++
+         if (BAD_REQUEST_EXCEPTIONS.contains(exClass)) {
+             return true;
+         }
+diff --git a/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/auth/HugeFactoryAuthProxy.java b/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/auth/HugeFactoryAuthProxy.java
+index 201511fe87..3ffaefb04f 100644
+--- a/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/auth/HugeFactoryAuthProxy.java
++++ b/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/auth/HugeFactoryAuthProxy.java
+@@ -57,13 +57,16 @@
+ import org.apache.hugegraph.traversal.optimize.HugeCountStepStrategy;
+ import org.apache.hugegraph.traversal.optimize.HugeGraphStepStrategy;
+ import org.apache.hugegraph.traversal.optimize.HugeVertexStepStrategy;
++import org.apache.hugegraph.util.Log;
+ import org.apache.hugegraph.util.Reflection;
+ import org.apache.hugegraph.variables.HugeVariables;
++import org.slf4j.Logger;
+ 
+ import com.google.common.collect.ImmutableSet;
+ 
+ public final class HugeFactoryAuthProxy {
+ 
++    private static final Logger LOG = Log.logger(HugeFactoryAuthProxy.class);
+     public static final String GRAPH_FACTORY =
+             "gremlin.graph=org.apache.hugegraph.auth.HugeFactoryAuthProxy";
+ 
+@@ -90,7 +93,11 @@ public static synchronized HugeGraph open(Configuration config) {
+         return proxy;
+     }
+ 
++    // TODO: add some test to ensure the effect & partially move to HugeSecurityManager
+     private static void registerPrivateActions() {
++        // Sensitive classes (Be careful to add classes here due to JDK compatibility)
++        filterCriticalSystemClasses();
++
+         // Thread
+         Reflection.registerFieldsToFilter(java.lang.Thread.class, "name", "priority", "threadQ",
+                                           "eetop", "single_step", "daemon", "stillborn", "target",
+@@ -106,7 +113,7 @@ private static void registerPrivateActions() {
+                                           "threadLocalRandomSecondarySeed");
+         Reflection.registerMethodsToFilter(java.lang.Thread.class, "exit",
+                                            "dispatchUncaughtException", "clone", "isInterrupted",
+-                                           "registerNatives", "init", "init", "nextThreadNum",
++                                           "registerNatives", "init", "nextThreadNum",
+                                            "nextThreadID", "blockedOn", "start0", "isCCLOverridden",
+                                            "auditSubclass", "dumpThreads", "getThreads",
+                                            "processQueue", "setPriority0", "stop0", "suspend0",
+@@ -477,6 +484,26 @@ private static void registerPrivateActions() {
+         //genRegisterPrivateActions();
+     }
+ 
++    public static void filterCriticalSystemClasses() {
++        // TODO: merge them in HugeSecurityManager after 1.5.0
++        Reflection.registerMethodsToFilter(Class.class, "forName", "newInstance");
++        Reflection.registerMethodsToFilter(ClassLoader.class, "loadClass", "newInstance");
++        Reflection.registerMethodsToFilter(Method.class, "invoke", "setAccessible");
++        Reflection.registerMethodsToFilter(Field.class, "set", "setAccessible");
++        Reflection.registerMethodsToFilter(java.lang.reflect.Constructor.class, "newInstance",
++                                           "setAccessible");
++        Reflection.registerMethodsToFilter(Runtime.class, "exec", "getRuntime");
++        Reflection.registerMethodsToFilter(ProcessBuilder.class, "command", "start",
++                                           "startPipeline");
++        Reflection.registerMethodsToFilter(loadClass("java.lang.ProcessImpl"), "forkAndExec",
++                                           "setAccessible", "start");
++
++        optionalMethodsToFilter("sun.invoke.util.BytecodeDescriptor", "parseMethod", "parseSig");
++        optionalMethodsToFilter("sun.reflect.misc.MethodUtil", "invoke");
++        optionalMethodsToFilter("jdk.internal.reflect.MethodAccessor", "invoke");
++        optionalMethodsToFilter("jdk.internal.reflect.NativeMethodAccessorImpl", "invoke");
++    }
++
+     @SuppressWarnings("unused")
+     private static void genRegisterPrivateActions() {
+         registerPrivateActions(Thread.class);
+@@ -562,20 +589,18 @@ private static void registerPrivateActions(Class<?> clazz) {
+         }
+     }
+ 
+-    private static boolean registerClass(Class<?> clazz,
+-                                         List<String> fields,
+-                                         List<String> methods) {
+-        if (clazz.getName().startsWith("java") ||
+-            fields.isEmpty() && methods.isEmpty()) {
+-            return false;
++    private static void registerClass(Class<?> clazz, List<String> fields, List<String> methods) {
++        if (clazz.getName().startsWith("java") || fields.isEmpty() && methods.isEmpty()) {
++            return;
+         }
++
+         final String[] array = new String[fields.size()];
+         try {
+             Reflection.registerFieldsToFilter(clazz, fields.toArray(array));
+             Reflection.registerMethodsToFilter(clazz, methods.toArray(array));
+         } catch (IllegalArgumentException e) {
+             if (e.getMessage().contains("Filter already registered: class")) {
+-                return false;
++                return;
+             }
+             throw e;
+         }
+@@ -596,8 +621,6 @@ private static boolean registerClass(Class<?> clazz,
+             System.out.println(code);
+             // CHECKSTYLE:ON
+         }
+-
+-        return true;
+     }
+ 
+     private static Class<?> loadClass(String clazz) {
+@@ -607,4 +630,17 @@ private static Class<?> loadClass(String clazz) {
+             throw new HugeException(e.getMessage(), e);
+         }
+     }
++
++    public static void optionalMethodsToFilter(String className, String... methodNames) {
++        Class<?> clazz = null;
++        try {
++            clazz = Class.forName(className);
++        } catch (ClassNotFoundException e) {
++            // TODO: we just ignore the exception, change it after we drop Java8 support
++            LOG.warn("Skip register class {} to filter", className);
++        }
++        if (clazz != null) {
++            Reflection.registerMethodsToFilter(clazz, methodNames);
++        }
++    }
+ }
+diff --git a/hugegraph-server/hugegraph-core/src/main/java/org/apache/hugegraph/security/HugeSecurityManager.java b/hugegraph-server/hugegraph-core/src/main/java/org/apache/hugegraph/security/HugeSecurityManager.java
+index 5e2dc761b7..f32491ece5 100644
+--- a/hugegraph-server/hugegraph-core/src/main/java/org/apache/hugegraph/security/HugeSecurityManager.java
++++ b/hugegraph-server/hugegraph-core/src/main/java/org/apache/hugegraph/security/HugeSecurityManager.java
+@@ -34,10 +34,8 @@ public class HugeSecurityManager extends SecurityManager {
+ 
+     private static final String USER_DIR = System.getProperty("user.dir");
+ 
+-    private static final String USER_DIR_IDE =
+-            USER_DIR.endsWith("hugegraph-dist") ?
+-            USER_DIR.substring(0, USER_DIR.length() - 15) :
+-            null;
++    private static final String USER_DIR_IDE = USER_DIR.endsWith("hugegraph-dist") ?
++                                               USER_DIR.substring(0, USER_DIR.length() - 15) : null;
+ 
+     private static final String GREMLIN_SERVER_WORKER = "gremlin-server-exec";
+     private static final String TASK_WORKER = "task-worker";
+@@ -45,7 +43,7 @@ public class HugeSecurityManager extends SecurityManager {
+             "org.apache.tinkerpop.gremlin.groovy.jsr223.GremlinGroovyScriptEngine"
+     );
+ 
+-    // TODO: add "suppressAccessChecks"
++    // TODO: add "suppressAccessChecks" (influence groovy-AST init now)
+     private static final Set<String> DENIED_PERMISSIONS = ImmutableSet.of("setSecurityManager");
+ 
+     private static final Set<String> ACCEPT_CLASS_LOADERS = ImmutableSet.of(
+@@ -65,9 +63,12 @@ public class HugeSecurityManager extends SecurityManager {
+     private static final Set<String> WHITE_SYSTEM_PROPERTIES = ImmutableSet.of(
+             "line.separator",
+             "file.separator",
+-            "java.specification.version", // Sofa
+-            "socksProxyHost", // MySQL
+-            "file.encoding" // PostgreSQL
++            // Sofa
++            "java.specification.version",
++            // MySQL
++            "socksProxyHost",
++            // PostgreSQL
++            "file.encoding"
+     );
+ 
+     private static final Map<String, Set<String>> ASYNC_TASKS = ImmutableMap.of(
+@@ -129,36 +130,32 @@ public class HugeSecurityManager extends SecurityManager {
+ 
+     public static void ignoreCheckedClass(String clazz) {
+         if (callFromGremlin()) {
+-            throw newSecurityException(
+-                    "Not allowed to add ignore check via Gremlin");
++            throw newSecurityException("Not allowed to add ignore check via Gremlin");
+         }
+-
+         IGNORE_CHECKED_CLASSES.add(clazz);
+     }
+ 
+     @Override
+-    public void checkPermission(Permission permission) {
+-        if (DENIED_PERMISSIONS.contains(permission.getName()) &&
+-            callFromGremlin()) {
+-            throw newSecurityException(
+-                    "Not allowed to access denied permission via Gremlin");
++    public void checkPermission(Permission perm) {
++        if (DENIED_PERMISSIONS.contains(perm.getName()) && callFromGremlin()) {
++            // TODO: consider ban the Reflection/Runtime/SerializablePermission after
++            //       identifying the "callFromGremlin()" clearly
++            throw newSecurityException("Not allowed to access denied permission via Gremlin: %s",
++                                       perm);
+         }
+     }
+ 
+     @Override
+-    public void checkPermission(Permission permission, Object context) {
+-        if (DENIED_PERMISSIONS.contains(permission.getName()) &&
+-            callFromGremlin()) {
+-            throw newSecurityException(
+-                    "Not allowed to access denied permission via Gremlin");
+-        }
++    public void checkPermission(Permission perm, Object context) {
++        this.checkPermission(perm);
++        // Ignore the context & enable when needed
++        //super.checkPermission(perm, context);
+     }
+ 
+     @Override
+     public void checkCreateClassLoader() {
+         if (!callFromAcceptClassLoaders() && callFromGremlin()) {
+-            throw newSecurityException(
+-                    "Not allowed to create class loader via Gremlin");
++            throw newSecurityException("Not allowed to create class loader via Gremlin");
+         }
+         super.checkCreateClassLoader();
+     }
+@@ -166,8 +163,7 @@ public void checkCreateClassLoader() {
+     @Override
+     public void checkLink(String lib) {
+         if (callFromGremlin()) {
+-            throw newSecurityException(
+-                    "Not allowed to link library via Gremlin");
++            throw newSecurityException("Not allowed to link library via Gremlin");
+         }
+         super.checkLink(lib);
+     }
+@@ -178,8 +174,7 @@ public void checkAccess(Thread thread) {
+             !callFromAsyncTasks() && !callFromEventHubNotify() &&
+             !callFromBackendThread() && !callFromBackendHbase() &&
+             !callFromRaft() && !callFromSofaRpc() && !callFromIgnoreCheckedClass()) {
+-            throw newSecurityException(
+-                    "Not allowed to access thread via Gremlin");
++            throw newSecurityException("Not allowed to access thread via Gremlin");
+         }
+         super.checkAccess(thread);
+     }
+@@ -191,8 +186,7 @@ public void checkAccess(ThreadGroup threadGroup) {
+             !callFromBackendThread() && !callFromBackendHbase() &&
+             !callFromRaft() && !callFromSofaRpc() &&
+             !callFromIgnoreCheckedClass()) {
+-            throw newSecurityException(
+-                    "Not allowed to access thread group via Gremlin");
++            throw newSecurityException("Not allowed to access thread group via Gremlin");
+         }
+         super.checkAccess(threadGroup);
+     }
+@@ -200,8 +194,7 @@ public void checkAccess(ThreadGroup threadGroup) {
+     @Override
+     public void checkExit(int status) {
+         if (callFromGremlin()) {
+-            throw newSecurityException(
+-                    "Not allowed to call System.exit() via Gremlin");
++            throw newSecurityException("Not allowed to call System.exit() via Gremlin");
+         }
+         super.checkExit(status);
+     }
+@@ -209,16 +202,15 @@ public void checkExit(int status) {
+     @Override
+     public void checkExec(String cmd) {
+         if (callFromGremlin()) {
+-            throw newSecurityException(
+-                    "Not allowed to execute command via Gremlin");
++            throw newSecurityException("Not allowed to execute command via Gremlin");
+         }
+         super.checkExec(cmd);
+     }
+ 
+     @Override
+     public void checkRead(FileDescriptor fd) {
+-        if (callFromGremlin() && !callFromBackendSocket() &&
+-            !callFromRaft() && !callFromSofaRpc()) {
++        if (callFromGremlin() && !callFromBackendSocket() && !callFromRaft() &&
++            !callFromSofaRpc()) {
+             throw newSecurityException("Not allowed to read fd via Gremlin");
+         }
+         super.checkRead(fd);
+@@ -228,10 +220,8 @@ public void checkRead(FileDescriptor fd) {
+     public void checkRead(String file) {
+         if (callFromGremlin() && !callFromCaffeine() &&
+             !readGroovyInCurrentDir(file) && !callFromBackendHbase() &&
+-            !callFromSnapshot() && !callFromRaft() &&
+-            !callFromSofaRpc()) {
+-            throw newSecurityException(
+-                    "Not allowed to read file via Gremlin: %s", file);
++            !callFromSnapshot() && !callFromRaft() && !callFromSofaRpc()) {
++            throw newSecurityException("Not allowed to read file via Gremlin: %s", file);
+         }
+         super.checkRead(file);
+     }
+@@ -239,16 +229,15 @@ public void checkRead(String file) {
+     @Override
+     public void checkRead(String file, Object context) {
+         if (callFromGremlin() && !callFromRaft() && !callFromSofaRpc()) {
+-            throw newSecurityException(
+-                    "Not allowed to read file via Gremlin: %s", file);
++            throw newSecurityException("Not allowed to read file via Gremlin: %s", file);
+         }
+         super.checkRead(file, context);
+     }
+ 
+     @Override
+     public void checkWrite(FileDescriptor fd) {
+-        if (callFromGremlin() && !callFromBackendSocket() &&
+-            !callFromRaft() && !callFromSofaRpc()) {
++        if (callFromGremlin() && !callFromBackendSocket() && !callFromRaft() &&
++            !callFromSofaRpc()) {
+             throw newSecurityException("Not allowed to write fd via Gremlin");
+         }
+         super.checkWrite(fd);
+@@ -256,8 +245,7 @@ public void checkWrite(FileDescriptor fd) {
+ 
+     @Override
+     public void checkWrite(String file) {
+-        if (callFromGremlin() && !callFromSnapshot() &&
+-            !callFromRaft() && !callFromSofaRpc()) {
++        if (callFromGremlin() && !callFromSnapshot() && !callFromRaft() && !callFromSofaRpc()) {
+             throw newSecurityException("Not allowed to write file via Gremlin");
+         }
+         super.checkWrite(file);
+@@ -266,8 +254,7 @@ public void checkWrite(String file) {
+     @Override
+     public void checkDelete(String file) {
+         if (callFromGremlin() && !callFromSnapshot()) {
+-            throw newSecurityException(
+-                    "Not allowed to delete file via Gremlin");
++            throw newSecurityException("Not allowed to delete file via Gremlin");
+         }
+         super.checkDelete(file);
+     }
+@@ -275,8 +262,7 @@ public void checkDelete(String file) {
+     @Override
+     public void checkListen(int port) {
+         if (callFromGremlin()) {
+-            throw newSecurityException(
+-                    "Not allowed to listen socket via Gremlin");
++            throw newSecurityException("Not allowed to listen socket via Gremlin");
+         }
+         super.checkListen(port);
+     }
+@@ -284,8 +270,7 @@ public void checkListen(int port) {
+     @Override
+     public void checkAccept(String host, int port) {
+         if (callFromGremlin()) {
+-            throw newSecurityException(
+-                    "Not allowed to accept socket via Gremlin");
++            throw newSecurityException("Not allowed to accept socket via Gremlin");
+         }
+         super.checkAccept(host, port);
+     }
+@@ -294,8 +279,7 @@ public void checkAccept(String host, int port) {
+     public void checkConnect(String host, int port) {
+         if (callFromGremlin() && !callFromBackendSocket() &&
+             !callFromBackendHbase() && !callFromRaft() && !callFromSofaRpc()) {
+-            throw newSecurityException(
+-                    "Not allowed to connect socket via Gremlin");
++            throw newSecurityException("Not allowed to connect socket via Gremlin");
+         }
+         super.checkConnect(host, port);
+     }
+@@ -303,44 +287,46 @@ public void checkConnect(String host, int port) {
+     @Override
+     public void checkConnect(String host, int port, Object context) {
+         if (callFromGremlin()) {
+-            throw newSecurityException(
+-                    "Not allowed to connect socket via Gremlin");
++            throw newSecurityException("Not allowed to connect socket via Gremlin");
+         }
+         super.checkConnect(host, port, context);
+     }
+ 
+     @Override
+-    public void checkMulticast(InetAddress maddr) {
++    public void checkMulticast(InetAddress addrs) {
+         if (callFromGremlin()) {
+             throw newSecurityException("Not allowed to multicast via Gremlin");
+         }
+-        super.checkMulticast(maddr);
++        super.checkMulticast(addrs);
++    }
++
++    public void checkMemberAccess(Class<?> clazz, int which) {
++        if (callFromGremlin()) {
++            throw newSecurityException("Not allowed to access member via Gremlin");
++        }
+     }
+ 
+     @Override
+     @SuppressWarnings("deprecation")
+-    public void checkMulticast(InetAddress maddr, byte ttl) {
++    public void checkMulticast(InetAddress addrs, byte ttl) {
+         if (callFromGremlin()) {
+             throw newSecurityException("Not allowed to multicast via Gremlin");
+         }
+-        super.checkMulticast(maddr, ttl);
++        super.checkMulticast(addrs, ttl);
+     }
+ 
+     @Override
+     public void checkSetFactory() {
+         if (callFromGremlin()) {
+-            throw newSecurityException(
+-                    "Not allowed to set socket factory via Gremlin");
++            throw newSecurityException("Not allowed to set socket factory via Gremlin");
+         }
+         super.checkSetFactory();
+     }
+ 
+     @Override
+     public void checkPropertiesAccess() {
+-        if (callFromGremlin() && !callFromSofaRpc() &&
+-            !callFromNewSecurityException()) {
+-            throw newSecurityException(
+-                    "Not allowed to access system properties via Gremlin");
++        if (callFromGremlin() && !callFromSofaRpc() && !callFromNewSecurityException()) {
++            throw newSecurityException("Not allowed to access system properties via Gremlin");
+         }
+         super.checkPropertiesAccess();
+     }
+@@ -349,10 +335,9 @@ public void checkPropertiesAccess() {
+     public void checkPropertyAccess(String key) {
+         if (!callFromAcceptClassLoaders() && callFromGremlin() &&
+             !WHITE_SYSTEM_PROPERTIES.contains(key) && !callFromBackendHbase() &&
+-            !callFromSnapshot() && !callFromRaft() &&
+-            !callFromSofaRpc()) {
+-            throw newSecurityException(
+-                    "Not allowed to access system property(%s) via Gremlin", key);
++            !callFromSnapshot() && !callFromRaft() && !callFromSofaRpc()) {
++            throw newSecurityException("Not allowed to access system property(%s) via Gremlin",
++                                       key);
+         }
+         super.checkPropertyAccess(key);
+     }
+@@ -367,6 +352,8 @@ public void checkPrintJobAccess() {
+ 
+     @Override
+     public void checkPackageAccess(String pkg) {
++        // TODO: consider ban the "*.reflect" package after identifying "callFromGremlin()" clearly
++        //       maybe better than check in "checkPermission()" (early check & better performance)
+         super.checkPackageAccess(pkg);
+     }
+ 
+@@ -380,15 +367,13 @@ public void checkSecurityAccess(String target) {
+         super.checkSecurityAccess(target);
+     }
+ 
+-    private static SecurityException newSecurityException(String message,
+-                                                          Object... args) {
++    private static SecurityException newSecurityException(String message, Object... args) {
+         if (args.length > 0) {
+             message = String.format(message, args);
+         }
+         /*
+-         * use dynamic logger here because "static final logger" can't be
+-         * initialized: the logger is not initialized when HugeSecurityManager
+-         * class is loaded
++         * Use dynamic logger here because "static final logger" can't be initialized:
++         * the logger is not initialized when HugeSecurityManager class is loaded
+          */
+         Logger log = Log.logger(HugeSecurityManager.class);
+         log.warn("SecurityException: {}", message);
+@@ -401,7 +386,9 @@ private static boolean readGroovyInCurrentDir(String file) {
+                (file.endsWith(".class") || file.endsWith(".groovy"));
+     }
+ 
++    // TODO: add/use more accurate flag to identify the caller -> callFromUserGremlin()
+     private static boolean callFromGremlin() {
++        // Currently, the lifecycle of GremlinExecutor is not clear(too broad)
+         return callFromWorkerWithClass(GREMLIN_EXECUTOR_CLASS);
+     }
+ 
+@@ -425,7 +412,7 @@ private static boolean callFromBackendThread() {
+ 
+     private static boolean callFromEventHubNotify() {
+         // Fixed issue #758
+-        // notify() will create thread when submit task to executor
++        // notify() will create thread when submit a task to executor
+         return callFromMethod("org.apache.hugegraph.event.EventHub", "notify");
+     }
+ 
+@@ -498,4 +485,20 @@ private static boolean callFromMethod(String clazz, String method) {
+         }
+         return false;
+     }
++
++    private static void filterBasicSensitiveClasses() {
++        // TODO: Conflicts with log4j2, handle it in 1.5.0
++        //Reflection.registerFieldsToFilter(Thread.class, "name");
++        //Reflection.registerMethodsToFilter(Class.class, "forName", "newInstance");
++        //Reflection.registerMethodsToFilter(ClassLoader.class, "loadClass", "newInstance");
++        //Reflection.registerMethodsToFilter(Method.class, "invoke", "setAccessible");
++        //Reflection.registerMethodsToFilter(Field.class, "set", "setAccessible");
++        //Reflection.registerMethodsToFilter(java.lang.reflect.Constructor.class, "newInstance",
++        //                                   "setAccessible");
++        //Reflection.registerMethodsToFilter(Runtime.class, "exec", "getRuntime");
++        //Reflection.registerMethodsToFilter(ProcessBuilder.class, "command", "start",
++        //                                   "startPipeline");
++        //Reflection.registerMethodsToFilter(Reflection.loadClass("java.lang.ProcessImpl"),
++        //                                   "forkAndExec", "setAccessible", "start");
++    }
+ }
+diff --git a/hugegraph-server/hugegraph-core/src/main/java/org/apache/hugegraph/util/Reflection.java b/hugegraph-server/hugegraph-core/src/main/java/org/apache/hugegraph/util/Reflection.java
+index 150fb2949d..f853824029 100644
+--- a/hugegraph-server/hugegraph-core/src/main/java/org/apache/hugegraph/util/Reflection.java
++++ b/hugegraph-server/hugegraph-core/src/main/java/org/apache/hugegraph/util/Reflection.java
+@@ -31,20 +31,17 @@ public class Reflection {
+ 
+     private static final Class<?> REFLECTION_CLAZZ;
+     private static final Method REGISTER_FILEDS_TO_FILTER_METHOD;
+-    private static final Method REGISTER_METHODS_TO_FILTER_MOTHOD;
++    private static final Method REGISTER_METHODS_TO_FILTER_METHOD;
+ 
+-    public static final String JDK_INTERNAL_REFLECT_REFLECTION =
+-            "jdk.internal.reflect.Reflection";
+-    public static final String SUN_REFLECT_REFLECTION =
+-            "sun.reflect.Reflection";
++    public static final String JDK_INTERNAL_REFLECT_REFLECTION = "jdk.internal.reflect.Reflection";
++    public static final String SUN_REFLECT_REFLECTION = "sun.reflect.Reflection";
+ 
+     static {
+         Method registerFieldsToFilterMethodTemp = null;
+         Method registerMethodsToFilterMethodTemp = null;
+         Class<?> reflectionClazzTemp = null;
+         try {
+-            reflectionClazzTemp = Class.forName(
+-                    JDK_INTERNAL_REFLECT_REFLECTION);
++            reflectionClazzTemp = Class.forName(JDK_INTERNAL_REFLECT_REFLECTION);
+         } catch (ClassNotFoundException e) {
+             try {
+                 reflectionClazzTemp = Class.forName(SUN_REFLECT_REFLECTION);
+@@ -73,42 +70,43 @@ public class Reflection {
+             }
+         }
+         REGISTER_FILEDS_TO_FILTER_METHOD = registerFieldsToFilterMethodTemp;
+-        REGISTER_METHODS_TO_FILTER_MOTHOD = registerMethodsToFilterMethodTemp;
++        REGISTER_METHODS_TO_FILTER_METHOD = registerMethodsToFilterMethodTemp;
+     }
+ 
+-    public static void registerFieldsToFilter(Class<?> containingClass,
+-                                              String... fieldNames) {
++    public static void registerFieldsToFilter(Class<?> containingClass, String... fieldNames) {
+         if (REGISTER_FILEDS_TO_FILTER_METHOD == null) {
+-            throw new NotSupportException(
+-                    "Reflection.registerFieldsToFilter()");
++            throw new NotSupportException("Reflection.registerFieldsToFilter()");
+         }
+ 
+         try {
+             REGISTER_FILEDS_TO_FILTER_METHOD.setAccessible(true);
+-            REGISTER_FILEDS_TO_FILTER_METHOD.invoke(REFLECTION_CLAZZ,
+-                                                    containingClass, fieldNames);
++            REGISTER_FILEDS_TO_FILTER_METHOD.invoke(REFLECTION_CLAZZ, containingClass, fieldNames);
+         } catch (IllegalAccessException | InvocationTargetException e) {
+-            throw new HugeException(
+-                    "Failed to register class '%s' fields to filter: %s",
+-                    containingClass, Arrays.toString(fieldNames));
++            throw new HugeException("Failed to register class '%s' fields to filter: %s",
++                                    containingClass, Arrays.toString(fieldNames));
+         }
+     }
+ 
+-    public static void registerMethodsToFilter(Class<?> containingClass,
+-                                               String... methodNames) {
+-        if (REGISTER_METHODS_TO_FILTER_MOTHOD == null) {
+-            throw new NotSupportException(
+-                    "Reflection.registerMethodsToFilterMethod()");
++    public static void registerMethodsToFilter(Class<?> containingClass, String... methodNames) {
++        if (REGISTER_METHODS_TO_FILTER_METHOD == null) {
++            throw new NotSupportException("Reflection.registerMethodsToFilterMethod()");
+         }
+ 
+         try {
+-            REGISTER_METHODS_TO_FILTER_MOTHOD.setAccessible(true);
+-            REGISTER_METHODS_TO_FILTER_MOTHOD.invoke(REFLECTION_CLAZZ,
+-                                                     containingClass, methodNames);
++            REGISTER_METHODS_TO_FILTER_METHOD.setAccessible(true);
++            REGISTER_METHODS_TO_FILTER_METHOD.invoke(REFLECTION_CLAZZ, containingClass,
++                                                     methodNames);
+         } catch (IllegalAccessException | InvocationTargetException e) {
+-            throw new HugeException(
+-                    "Failed to register class '%s' methods to filter: %s",
+-                    containingClass, Arrays.toString(methodNames));
++            throw new HugeException("Failed to register class '%s' methods to filter: %s",
++                                    containingClass, Arrays.toString(methodNames));
++        }
++    }
++
++    public static Class<?> loadClass(String clazz) {
++        try {
++            return Class.forName(clazz);
++        } catch (ClassNotFoundException e) {
++            throw new HugeException(e.getMessage(), e);
+         }
+     }
+ }
+diff --git a/hugegraph-server/hugegraph-dist/src/assembly/static/bin/hugegraph-server.sh b/hugegraph-server/hugegraph-dist/src/assembly/static/bin/hugegraph-server.sh
+index de2fdd8da4..8174082d49 100644
+--- a/hugegraph-server/hugegraph-dist/src/assembly/static/bin/hugegraph-server.sh
++++ b/hugegraph-server/hugegraph-dist/src/assembly/static/bin/hugegraph-server.sh
+@@ -65,6 +65,7 @@ MIN_MEM=$((1 * 512))
+ MIN_JAVA_VERSION=8
+ 
+ # Note: Download for HTTPS, could comment out if you don't need it
++# TODO: only download it when we config https (check the conf file)
+ if [[ ! -e "${CONF}/hugegraph-server.keystore" ]]; then
+     download "${CONF}" "${GITHUB}/apache/hugegraph-doc/raw/binary-1.0/dist/server/hugegraph-server.keystore"
+ fi
+diff --git a/hugegraph-server/hugegraph-dist/src/main/resources/log4j2.xml b/hugegraph-server/hugegraph-dist/src/main/resources/log4j2.xml
+index b249fdae48..3724de4ebe 100644
+--- a/hugegraph-server/hugegraph-dist/src/main/resources/log4j2.xml
++++ b/hugegraph-server/hugegraph-dist/src/main/resources/log4j2.xml
+@@ -141,7 +141,7 @@
+             <appender-ref ref="file"/>
+         </AsyncLogger>
+         <AsyncLogger name="org.apache.hugegraph.auth" level="INFO" additivity="false">
+-            <appender-ref ref="console"/>
++            <!--appender-ref ref="console"/-->
+             <appender-ref ref="audit"/>
+         </AsyncLogger>
+         <AsyncLogger name="org.apache.hugegraph.api.filter.AuthenticationFilter" level="INFO" additivity="false">
+diff --git a/hugegraph-server/hugegraph-test/src/main/java/org/apache/hugegraph/unit/core/SecurityManagerTest.java b/hugegraph-server/hugegraph-test/src/main/java/org/apache/hugegraph/unit/core/SecurityManagerTest.java
+index 2b72f9c3de..1facaf2f43 100644
+--- a/hugegraph-server/hugegraph-test/src/main/java/org/apache/hugegraph/unit/core/SecurityManagerTest.java
++++ b/hugegraph-server/hugegraph-test/src/main/java/org/apache/hugegraph/unit/core/SecurityManagerTest.java
+@@ -35,6 +35,7 @@
+ import org.apache.hugegraph.HugeException;
+ import org.apache.hugegraph.HugeFactory;
+ import org.apache.hugegraph.HugeGraph;
++import org.apache.hugegraph.auth.HugeFactoryAuthProxy;
+ import org.apache.hugegraph.config.HugeConfig;
+ import org.apache.hugegraph.job.GremlinJob;
+ import org.apache.hugegraph.job.JobBuilder;
+@@ -46,6 +47,7 @@
+ import org.apache.hugegraph.util.JsonUtil;
+ import org.junit.AfterClass;
+ import org.junit.BeforeClass;
++import org.junit.Ignore;
+ import org.junit.Test;
+ 
+ import com.google.common.collect.ImmutableMap;
+@@ -53,7 +55,7 @@
+ public class SecurityManagerTest {
+ 
+     private static HugeGraph graph;
+-    private static HugeSecurityManager sm = new HugeSecurityManager();
++    private static final HugeSecurityManager sm = new HugeSecurityManager();
+ 
+     @BeforeClass
+     public static void init() {
+@@ -71,6 +73,25 @@ public static void clear() throws Exception {
+         HugeFactory.shutdown(30L);
+     }
+ 
++    @Ignore("Enable it after 1.5.0")
++    public void testProcessImplMethodAccess() throws Exception {
++        new HugeFactoryAuthProxy();
++        Class<?> clz = Class.forName("java.lang.ProcessImpl");
++        Assert.assertThrows(NoSuchMethodException.class, () -> {
++            clz.getDeclaredMethod("start", String[].class, Map.class, String.class,
++                                  ProcessBuilder.Redirect[].class, boolean.class);
++        });
++    }
++
++    @Ignore("Enable it after 1.5.0")
++    public void testThreadFieldAccess() throws Exception {
++        new HugeFactoryAuthProxy();
++        Class<?> clz = Class.forName("java.lang.Thread");
++        Assert.assertThrows(NoSuchFieldException.class, () -> {
++            clz.getDeclaredField("name");
++        });
++    }
++
+     @Test
+     public void testNormal() {
+         String result = runGremlinJob("g.V()");
+@@ -83,20 +104,18 @@ public void testNormal() {
+     @Test
+     public void testPermission() {
+         String result = runGremlinJob("System.setSecurityManager(null)");
+-        assertError(result,
+-                    "Not allowed to access denied permission via Gremlin");
++        assertError(result, "Not allowed to access denied permission via Gremlin");
+     }
+ 
+     @Test
+     public void testClassLoader() {
+-        String result = runGremlinJob("System.getSecurityManager()" +
+-                                      ".checkCreateClassLoader()");
++        String result = runGremlinJob("System.getSecurityManager().checkCreateClassLoader()");
+         assertError(result, "Not allowed to create class loader via Gremlin");
+     }
+ 
+     @Test
+     public void testThread() {
+-        // access thread group
++        // access a thread group
+         new Thread();
+         String result = runGremlinJob("new Thread()");
+         assertError(result, "Not allowed to access thread group via Gremlin");
+@@ -116,7 +135,7 @@ public void testExit() {
+     @Test
+     public void testFile() {
+         // read file
+-        try (FileInputStream fis = new FileInputStream(new File(""))) {
++        try (FileInputStream fis = new FileInputStream("")) {
+             // pass
+         } catch (IOException ignored) {
+             // ignored exception
+@@ -126,7 +145,7 @@ public void testFile() {
+ 
+         // read file
+         String pom = System.getProperty("user.dir") + "/a.groovy";
+-        try (FileInputStream fis = new FileInputStream(new File(pom))) {
++        try (FileInputStream fis = new FileInputStream(pom)) {
+             // pass
+         } catch (IOException ignored) {
+             // ignored exception
+@@ -147,7 +166,7 @@ public void testFile() {
+         assertError(result, "Not allowed to read file via Gremlin");
+ 
+         // write file
+-        try (FileOutputStream fos = new FileOutputStream(new File(""))) {
++        try (FileOutputStream fos = new FileOutputStream("")) {
+             // pass
+         } catch (IOException ignored) {
+             // ignored IOException
+@@ -258,14 +277,11 @@ public void testLink() {
+     public void testProperties() {
+         System.getProperties();
+         String result = runGremlinJob("System.getProperties()");
+-        assertError(result,
+-                    "Not allowed to access system properties via Gremlin");
++        assertError(result, "Not allowed to access system properties via Gremlin");
+ 
+         System.getProperty("java.version");
+         result = runGremlinJob("System.getProperty(\"java.version\")");
+-        assertError(result,
+-                    "Not allowed to access system property(java.version) " +
+-                    "via Gremlin");
++        assertError(result, "Not allowed to access system property(java.version) via Gremlin");
+     }
+ 
+     @Test
+@@ -287,8 +303,7 @@ public void testSecurityAccess() {
+     }
+ 
+     private static void assertError(String result, String message) {
+-        Assert.assertTrue(result, result.endsWith(message) ||
+-                                  result.contains(message));
++        Assert.assertTrue(result, result.endsWith(message) || result.contains(message));
+     }
+ 
+     private static String runGremlinJob(String gremlin) {
+diff --git a/pom.xml b/pom.xml
+index 3de7393dba..c4dfe351d6 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -26,7 +26,7 @@
+     <name>${project.artifactId}</name>
+     <url>https://github.com/apache/hugegraph</url>
+     <description>
+-        HugeGraph is a fast-speed and highly-scalable graph database.
++        HugeGraph is a fast-speed and highly scalable graph database.
+     </description>
+ 
+     <parent>

@@ -1,0 +1,74 @@
+From b2e91105315ccf2c1df549b4f6c5948322cbfd1b Mon Sep 17 00:00:00 2001
+From: Ricardo Martin <rmartinc@redhat.com>
+Date: Wed, 6 Dec 2023 13:50:40 +0100
+Subject: [PATCH] Strip off user-info from redirect URI when validating using
+ wildcard (#61)
+
+Closes https://issues.redhat.com/browse/RHBK-679
+
+Signed-off-by: rmartinc <rmartinc@redhat.com>
+---
+ .../protocol/oidc/utils/RedirectUtils.java    | 15 ++++++++++++--
+ .../oidc/utils/RedirectUtilsTest.java         | 20 +++++++++++++++++++
+ 2 files changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/services/src/main/java/org/keycloak/protocol/oidc/utils/RedirectUtils.java b/services/src/main/java/org/keycloak/protocol/oidc/utils/RedirectUtils.java
+index 81669f53773f..3b95404abaca 100644
+--- a/services/src/main/java/org/keycloak/protocol/oidc/utils/RedirectUtils.java
++++ b/services/src/main/java/org/keycloak/protocol/oidc/utils/RedirectUtils.java
+@@ -248,13 +248,24 @@ private static String relativeToAbsoluteURI(KeycloakSession session, String root
+         return sb.toString();
+     }
+ 
++    // removes the queryString, fragment and userInfo from the redirect
++    // to avoid comparing this when wildcards are used
++    private static String stripOffRedirectForWildcard(String redirect) {
++        return KeycloakUriBuilder.fromUri(redirect, false)
++                .preserveDefaultPort()
++                .userInfo(null)
++                .replaceQuery(null)
++                .fragment(null)
++                .buildAsString();
++    }
++
+     // return the String that matched the redirect or null if not matched
+     private static String matchesRedirects(Set<String> validRedirects, String redirect, boolean allowWildcards) {
+         logger.tracef("matchesRedirects: redirect URL to check: %s, allow wildcards: %b, Configured valid redirect URLs: %s", redirect, allowWildcards, validRedirects);
+         for (String validRedirect : validRedirects) {
+             if (validRedirect.endsWith("*") && !validRedirect.contains("?") && allowWildcards) {
+-                // strip off the query component - we don't check them when wildcards are effective
+-                String r = redirect.contains("?") ? redirect.substring(0, redirect.indexOf("?")) : redirect;
++                // strip off the userInfo, query or fragment components - we don't check them when wildcards are effective
++                String r = stripOffRedirectForWildcard(redirect);
+                 // strip off *
+                 int length = validRedirect.length() - 1;
+                 validRedirect = validRedirect.substring(0, length);
+diff --git a/services/src/test/java/org/keycloak/protocol/oidc/utils/RedirectUtilsTest.java b/services/src/test/java/org/keycloak/protocol/oidc/utils/RedirectUtilsTest.java
+index 54a4caa04ec3..662e9a8f32a1 100644
+--- a/services/src/test/java/org/keycloak/protocol/oidc/utils/RedirectUtilsTest.java
++++ b/services/src/test/java/org/keycloak/protocol/oidc/utils/RedirectUtilsTest.java
+@@ -174,4 +174,24 @@ public void testRelativeRedirectUri() {
+         Assert.assertEquals("https://keycloak.org/path", RedirectUtils.verifyRedirectUri(session, "https://keycloak.org", "path", set, false));
+     }
+ 
++    @Test
++    public void testUserInfo() {
++        Set<String> set = Stream.of(
++                "https://keycloak.org/*",
++                "https://test*",
++                "https://something@keycloak.com/exact"
++        ).collect(Collectors.toSet());
++
++        Assert.assertEquals("https://keycloak.org/index.html", RedirectUtils.verifyRedirectUri(session, null, "https://keycloak.org/index.html", set, false));
++        Assert.assertEquals("https://test.com/index.html", RedirectUtils.verifyRedirectUri(session, null, "https://test.com/index.html", set, false));
++        Assert.assertEquals("https://something@keycloak.org/path", RedirectUtils.verifyRedirectUri(session, null, "https://something@keycloak.org/path", set, false));
++        Assert.assertEquals("https://some%20thing@test.com/path", RedirectUtils.verifyRedirectUri(session, null, "https://some%20thing@test.com/path", set, false));
++        Assert.assertEquals("https://something@keycloak.com/exact", RedirectUtils.verifyRedirectUri(session, null, "https://something@keycloak.com/exact", set, false));
++
++        Assert.assertNull(RedirectUtils.verifyRedirectUri(session, null, "https://something@other.com/", set, false));
++        Assert.assertNull(RedirectUtils.verifyRedirectUri(session, null, "https://keycloak.org@other.com", set, false));
++        Assert.assertNull(RedirectUtils.verifyRedirectUri(session, null, "https://keycloak.org%2F@other.com", set, false));
++        Assert.assertNull(RedirectUtils.verifyRedirectUri(session, null, "https://test@other.com", set, false));
++        Assert.assertNull(RedirectUtils.verifyRedirectUri(session, null, "https://test.com@other.com", set, false));
++    }
+ }
