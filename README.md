@@ -3,6 +3,7 @@
 > 接手维护、风险排查、运行核对，请优先阅读 [`docs/handover.md`](docs/handover.md)。
 > 那份文档是严格的交接手册，重点写当前状态、依赖、已知问题、标准操作和维护入口；本文保留为项目总览。
 > 如果你只是想把整套本地服务从 0 跑起来，请直接看 [`docs/startup.md`](docs/startup.md)。
+> 如果你要按目录和文件理解代码职责，请看 [`docs/source-guide.md`](docs/source-guide.md)。
 
 SanGraph 是一个围绕 sanitizer / validator 防御逻辑构建的安全分析工作台。它关注的核心问题很窄，但很重要：
 
