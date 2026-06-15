@@ -220,9 +220,17 @@ wait_for_http() {
   local name="$2"
   local attempts="${3:-60}"
   local sleep_seconds="${4:-2}"
+  local curl_args=(-fsS)
+
+  case "$url" in
+    http://127.0.0.1/*|http://127.0.0.1:*|http://localhost/*|http://localhost:*|\
+    https://127.0.0.1/*|https://127.0.0.1:*|https://localhost/*|https://localhost:*)
+      curl_args+=(--noproxy '*')
+      ;;
+  esac
 
   for ((i = 1; i <= attempts; i++)); do
-    if curl -fsS "$url" >/dev/null 2>&1; then
+    if curl "${curl_args[@]}" "$url" >/dev/null 2>&1; then
       log "$name is ready: $url"
       return 0
     fi

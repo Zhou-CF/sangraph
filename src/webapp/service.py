@@ -37,6 +37,7 @@ from .models import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_WEB_ARTIFACT_ROOT = REPO_ROOT / "other" / "artifacts" / "web"
+TASK_STATE_FILE_NAME = "task.json"
 logger = get_logger(__name__)
 
 LANGUAGE_BY_SUFFIX = {
@@ -91,6 +92,7 @@ class WebTaskService:
         self._tasks: dict[str, dict[str, Any]] = {}
         self._futures: dict[str, asyncio.Task[None]] = {}
         self._lock = threading.Lock()
+        self._restore_tasks_from_disk()
         logger.info("Initialized WebTaskService artifact_root=%s", self.artifact_root)
 
     async def submit_e2e(self, request: E2ETaskRequest) -> str:
@@ -111,15 +113,19 @@ class WebTaskService:
     def get_task_status(self, task_id: str) -> TaskResultEnvelope:
         with self._lock:
             payload = self._tasks.get(task_id)
+        if payload is None:
+            payload = self._load_task_from_disk(task_id)
             if payload is None:
                 raise TaskNotFoundError(task_id)
-            return TaskResultEnvelope.model_validate(dict(payload))
+            with self._lock:
+                self._tasks[task_id] = payload
+        return TaskResultEnvelope.model_validate(dict(payload))
 
     def get_task_result(self, task_id: str) -> TaskResultEnvelope:
         envelope = self.get_task_status(task_id)
         if envelope.status not in {"succeeded", "failed"}:
             raise TaskResultNotReadyError(task_id)
-        if envelope.result is None:
+        if envelope.status == "succeeded" and envelope.result is None:
             raise TaskResultNotReadyError(task_id)
         return envelope
 
@@ -628,6 +634,7 @@ class WebTaskService:
         }
         with self._lock:
             self._tasks[task_id] = payload
+        self._persist_task_snapshot(task_id, payload)
         logger.info("Created task task_id=%s task_type=%s inputs=%s", task_id, task_type, inputs)
         return task_id
 
@@ -638,6 +645,8 @@ class WebTaskService:
             payload["progress_stage"] = "completed"
             payload["finished_at"] = self._timestamp()
             payload["error"] = error.model_dump(mode="json")
+            snapshot = dict(payload)
+        self._persist_task_snapshot(task_id, snapshot)
         logger.error("Task failed task_id=%s error_code=%s error_message=%s", task_id, error.code, error.message)
 
     def _finalize_task(self, task_id: str, status: TaskStatus, result: dict[str, Any] | None) -> None:
@@ -647,30 +656,41 @@ class WebTaskService:
             payload["progress_stage"] = "completed"
             payload["finished_at"] = self._timestamp()
             payload["result"] = self._jsonable(result)
+            snapshot = dict(payload)
+        self._persist_task_snapshot(task_id, snapshot)
         logger.info("Task finalized task_id=%s status=%s", task_id, status)
 
     def _set_error(self, task_id: str, error: TaskError) -> None:
         with self._lock:
             payload = self._require_task(task_id)
             payload["error"] = error.model_dump(mode="json")
+            snapshot = dict(payload)
+        self._persist_task_snapshot(task_id, snapshot)
         logger.warning("Task recorded non-fatal error task_id=%s error_code=%s", task_id, error.code)
 
     def _set_stage(self, task_id: str, stage: TaskStage) -> None:
         with self._lock:
             payload = self._require_task(task_id)
             payload["progress_stage"] = stage
+            snapshot = dict(payload)
+        self._persist_task_snapshot(task_id, snapshot)
         logger.info("Task stage updated task_id=%s stage=%s", task_id, stage)
 
     def _set_status(self, task_id: str, status: TaskStatus) -> None:
         with self._lock:
             payload = self._require_task(task_id)
             payload["status"] = status
+            snapshot = dict(payload)
+        self._persist_task_snapshot(task_id, snapshot)
         logger.info("Task status updated task_id=%s status=%s", task_id, status)
 
     def _task_dir(self, task_id: str) -> Path:
         path = self.artifact_root / task_id
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def _task_state_path(self, task_id: str) -> Path:
+        return self._task_dir(task_id) / TASK_STATE_FILE_NAME
 
     def _require_task(self, task_id: str) -> dict[str, Any]:
         payload = self._tasks.get(task_id)
@@ -691,6 +711,69 @@ class WebTaskService:
     def _write_json(path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _persist_task_snapshot(self, task_id: str, payload: dict[str, Any]) -> None:
+        self._write_json(self._task_state_path(task_id), self._jsonable(payload))
+
+    def _restore_tasks_from_disk(self) -> None:
+        restored_count = 0
+        interrupted_count = 0
+        for task_dir in sorted(path for path in self.artifact_root.iterdir() if path.is_dir()):
+            state_path = task_dir / TASK_STATE_FILE_NAME
+            if not state_path.is_file():
+                continue
+            payload = self._read_task_snapshot(state_path)
+            if payload is None:
+                continue
+            payload, was_interrupted = self._normalize_restored_task(payload)
+            self._tasks[payload["task_id"]] = payload
+            restored_count += 1
+            if was_interrupted:
+                interrupted_count += 1
+                self._persist_task_snapshot(payload["task_id"], payload)
+        if restored_count:
+            logger.info(
+                "Restored %s task snapshots from %s interrupted=%s",
+                restored_count,
+                self.artifact_root,
+                interrupted_count,
+            )
+
+    def _load_task_from_disk(self, task_id: str) -> dict[str, Any] | None:
+        state_path = self.artifact_root / task_id / TASK_STATE_FILE_NAME
+        payload = self._read_task_snapshot(state_path)
+        if payload is not None:
+            logger.info("Loaded task snapshot from disk task_id=%s path=%s", task_id, state_path)
+        return payload
+
+    def _read_task_snapshot(self, state_path: Path) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            envelope = TaskResultEnvelope.model_validate(payload)
+        except FileNotFoundError:
+            return None
+        except Exception:
+            logger.exception("Failed to restore task snapshot path=%s", state_path)
+            return None
+        return envelope.model_dump(mode="json")
+
+    def _normalize_restored_task(self, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        if payload["status"] not in {"queued", "running"}:
+            return payload, False
+        interrupted_payload = dict(payload)
+        interrupted_payload["status"] = "failed"
+        interrupted_payload["progress_stage"] = "completed"
+        interrupted_payload["finished_at"] = interrupted_payload.get("finished_at") or self._timestamp()
+        interrupted_payload["error"] = TaskError(
+            code="server_restarted",
+            message="Task was interrupted because the API process restarted before completion.",
+            detail={
+                "restored_from_disk": True,
+                "previous_status": payload["status"],
+                "previous_stage": payload.get("progress_stage"),
+            },
+        ).model_dump(mode="json")
+        return interrupted_payload, True
 
     @classmethod
     def _jsonable(cls, value: Any) -> Any:

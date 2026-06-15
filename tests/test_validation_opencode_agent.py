@@ -49,8 +49,33 @@ class ValidationModuleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(text_payload)
 
     def test_parse_validation_result_rejects_empty_output(self):
-        with self.assertRaisesRegex(ValueError, "OpenCode returned empty output"):
-            agent._parse_validation_result("")
+        with TemporaryDirectory() as tmp_dir:
+            with self.assertRaisesRegex(Exception, "Structured output is empty"):
+                import asyncio
+
+                asyncio.run(agent._parse_validation_result("", audit_dir=Path(tmp_dir)))
+
+    async def test_parse_validation_result_repairs_fenced_json(self):
+        with TemporaryDirectory() as tmp_dir:
+            result = await agent._parse_validation_result(
+                "```json\n"
+                "{\n"
+                '  "strategy": "native_test",\n'
+                '  "verdict": "confirmed",\n'
+                '  "reasoning": "ok",\n'
+                '  "artifact_paths": {\n'
+                '    "audit_notebook": "/tmp/a.md",\n'
+                '    "main_artifact": "/tmp/b.py",\n'
+                '    "run_script": "/tmp/run.sh"\n'
+                "  },\n"
+                '  "executed_command": "bash /tmp/run.sh",\n'
+                '  "blockers": []\n'
+                "}\n"
+                "```",
+                audit_dir=Path(tmp_dir),
+            )
+        self.assertEqual(result.value.verdict, "confirmed")
+        self.assertIn(result.repair_method, {"direct", "local_repair"})
 
     async def test_run_validation_with_audit_writes_artifacts(self):
         original_open_code_agent = agent.OpenCodeAgent
@@ -114,6 +139,8 @@ class ValidationModuleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue((audit_dir / "validation_summary.json").exists())
                 self.assertIn("review_result", json.loads((audit_dir / "01_report_input.json").read_text(encoding="utf-8"))["report_summary"])
                 self.assertIn(str(repo_path.resolve()), FakeOpenCodeAgent.instances[0].last_prompt)
+                summary = json.loads((audit_dir / "validation_summary.json").read_text(encoding="utf-8"))
+                self.assertIn("json_repair", summary)
         finally:
             agent.OpenCodeAgent = original_open_code_agent
 

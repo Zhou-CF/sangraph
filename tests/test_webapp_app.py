@@ -106,6 +106,24 @@ class WebappAppTests(unittest.TestCase):
                 manifest = json.loads(archive.read(f"sangraph-task-{task_id}/manifest.json").decode("utf-8"))
                 self.assertEqual(manifest["status"], "failed")
 
+    def test_result_endpoint_returns_failed_task_restored_after_restart(self):
+        with TemporaryDirectory() as tmp_dir:
+            artifact_root = Path(tmp_dir) / "artifacts"
+            original_service = WebTaskService(artifact_root=artifact_root)
+            task_id = original_service._create_task("validation", {"report_path": "/tmp/report.json", "repo_path": "/tmp/repo"})
+            original_service._set_status(task_id, "running")
+            original_service._set_stage(task_id, "validation")
+
+            restored_service = WebTaskService(artifact_root=artifact_root)
+            client = TestClient(create_app(restored_service))
+            response = client.get(f"/api/tasks/{task_id}/result")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["error"]["code"], "server_restarted")
+            self.assertIsNone(payload["result"])
+
 
 if __name__ == "__main__":
     unittest.main()

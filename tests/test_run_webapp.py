@@ -23,6 +23,7 @@ class RunWebappTests(unittest.TestCase):
             host="127.0.0.1",
             port=8123,
             reload=True,
+            reload_dirs=[str(run_webapp.SRC_DIR)],
             log_config=None,
         )
 

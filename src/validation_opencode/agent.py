@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from json_repair import repair_json
+from json_recovery import ParseRepairResult, parse_or_repair_json
 from sangraph_logging import get_logger
 
 from base_opencode.script import DEFAULT_OPENCODE_MODEL, OpenCodeAgent
+from llm_factory.llm_factory import DEFAULT_DASHSCOPE_CHAT_MODEL, llm_factory
 
 from .llm_struct import ValidationResultStruct, ValidationStateStruct
 
@@ -60,18 +61,6 @@ def _resolve_audit_dir(report_path: str, audit_dir: str | Path | None) -> Path:
     report_stem = Path(report_path).stem or "report"
     timestamp = _utc_now().strftime("%Y%m%dT%H%M%SZ")
     return DEFAULT_AUDIT_ROOT / f"{timestamp}-{report_stem}-{uuid4().hex[:8]}"
-
-
-def _strip_code_fence(text: str) -> str:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        return "\n".join(lines).strip()
-    return stripped
 
 
 def _load_report(report_path: str | Path) -> tuple[str, str, dict[str, Any] | None]:
@@ -154,15 +143,27 @@ def build_validation_prompt(
     )
 
 
-def _parse_validation_result(response_text: str) -> ValidationResultStruct:
-    stripped = _strip_code_fence(response_text)
-    if not stripped:
-        raise ValueError("OpenCode returned empty output.")
-    repaired = repair_json(stripped, return_objects=True)
-    if not isinstance(repaired, dict):
-        preview = stripped[:400]
-        raise ValueError(f"OpenCode response is not a JSON object. Preview: {preview}")
-    return ValidationResultStruct.model_validate(repaired)
+async def _json_repair_llm(prompt: str) -> str:
+    response = await llm_factory(
+        llm_type="dashscope",
+        llm_model=os.getenv("DASHSCOPE_CHAT_MODEL", DEFAULT_DASHSCOPE_CHAT_MODEL),
+    ).ainvoke(prompt)
+    return response.content
+
+
+async def _parse_validation_result(
+    response_text: str,
+    *,
+    audit_dir: Path,
+) -> ParseRepairResult:
+    return await parse_or_repair_json(
+        response_text,
+        schema_model=ValidationResultStruct,
+        stage_name="validation_result",
+        audit_dir=audit_dir,
+        repair_llm=_json_repair_llm,
+        allow_llm_retry=True,
+    )
 
 
 def _write_opencode_debug_outputs(audit_dir: Path, opencode: OpenCodeAgent | None) -> None:
@@ -257,8 +258,16 @@ async def run_validation_with_audit(
         _write_opencode_debug_outputs(resolved_audit_dir, opencode)
         state["opencode_response"] = response
         _write_text(resolved_audit_dir / "03_opencode_response.txt", response)
-        result = _parse_validation_result(response)
-        state["result"] = result
+        repair_result = await _parse_validation_result(response, audit_dir=resolved_audit_dir)
+        state["json_repair"] = {
+            "repair_attempted": repair_result.repair_attempted,
+            "repair_method": repair_result.repair_method,
+            "repair_succeeded": repair_result.repair_succeeded,
+            "parse_error": repair_result.parse_error,
+            "llm_retry_error": repair_result.llm_retry_error,
+            "artifacts": repair_result.artifacts,
+        }
+        state["result"] = repair_result.value
     except Exception as exc:
         finished_at = _utc_now()
         _write_opencode_debug_outputs(resolved_audit_dir, opencode)
@@ -295,6 +304,7 @@ async def run_validation_with_audit(
                 "finished_at": _format_timestamp(finished_at),
                 "duration_seconds": round((finished_at - started_at).total_seconds(), 3),
                 "error": error_payload,
+                "json_repair": state.get("json_repair", {}),
             },
         )
         raise
@@ -313,6 +323,7 @@ async def run_validation_with_audit(
             "duration_seconds": round((finished_at - started_at).total_seconds(), 3),
             "report_format": state["report_format"],
             "report_summary": state["report_summary"],
+            "json_repair": state.get("json_repair", {}),
             "result": state["result"].model_dump(mode="json"),
         },
     )

@@ -27,7 +27,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     setup_logging()
-    uvicorn.run("webapp.app:app", host=args.host, port=args.port, reload=args.reload, log_config=None)
+    run_kwargs = {
+        "host": args.host,
+        "port": args.port,
+        "reload": args.reload,
+        "log_config": None,
+    }
+    if args.reload:
+        # Restrict autoreload to source code so generated validation artifacts do not restart the API.
+        run_kwargs["reload_dirs"] = [str(SRC_DIR)]
+    uvicorn.run("webapp.app:app", **run_kwargs)
     return 0
 
 

@@ -481,6 +481,68 @@ class WebTaskServiceTests(unittest.TestCase):
             with self.assertRaises(TaskResultNotReadyError):
                 service.build_task_log_bundle(task_id)
 
+    def test_restores_finished_task_from_disk_after_service_restart(self):
+        with TemporaryDirectory() as tmp_dir:
+            artifact_root = Path(tmp_dir) / "artifacts"
+            original_service = WebTaskService(artifact_root=artifact_root)
+            task_id = original_service._create_task("analysis", {"patch_path": "/tmp/fix.patch"})
+            original_service._finalize_task(
+                task_id,
+                "succeeded",
+                {
+                    "task_type": "analysis",
+                    "status": "succeeded",
+                    "summary": {"is_vuln": False},
+                    "artifacts": {},
+                },
+            )
+
+            restored_service = WebTaskService(artifact_root=artifact_root)
+            restored = restored_service.get_task_result(task_id)
+
+            self.assertEqual(restored.task_id, task_id)
+            self.assertEqual(restored.status, "succeeded")
+            self.assertFalse(restored.result["summary"]["is_vuln"])
+
+    def test_restores_inflight_task_as_failed_after_service_restart(self):
+        with TemporaryDirectory() as tmp_dir:
+            artifact_root = Path(tmp_dir) / "artifacts"
+            original_service = WebTaskService(artifact_root=artifact_root)
+            task_id = original_service._create_task("validation", {"report_path": "/tmp/report.json", "repo_path": "/tmp/repo"})
+            original_service._set_status(task_id, "running")
+            original_service._set_stage(task_id, "validation")
+
+            restored_service = WebTaskService(artifact_root=artifact_root)
+            restored = restored_service.get_task_result(task_id)
+
+            self.assertEqual(restored.status, "failed")
+            self.assertEqual(restored.progress_stage, "completed")
+            self.assertIsNotNone(restored.finished_at)
+            self.assertEqual(restored.error.code, "server_restarted")
+            self.assertIsNone(restored.result)
+
+    def test_get_task_status_falls_back_to_disk_when_memory_is_empty(self):
+        with TemporaryDirectory() as tmp_dir:
+            artifact_root = Path(tmp_dir) / "artifacts"
+            service = WebTaskService(artifact_root=artifact_root)
+            task_id = service._create_task("analysis", {"patch_path": "/tmp/fix.patch"})
+            service._finalize_task(
+                task_id,
+                "succeeded",
+                {
+                    "task_type": "analysis",
+                    "status": "succeeded",
+                    "summary": {"is_vuln": True},
+                    "artifacts": {},
+                },
+            )
+
+            service._tasks.clear()
+            restored = service.get_task_status(task_id)
+
+            self.assertEqual(restored.task_id, task_id)
+            self.assertEqual(restored.status, "succeeded")
+
 
 if __name__ == "__main__":
     unittest.main()

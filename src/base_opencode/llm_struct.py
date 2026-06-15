@@ -108,6 +108,7 @@ class FinalResultStruct(BaseModel):
 
 
 class StateGraphStruct(TypedDict, total=False):
+    audit_dir: str
     repo_path: str
     patch_path: str
     analysis_profile: Literal["standard", "enhanced_search"]
@@ -151,6 +152,7 @@ class StateGraphStruct(TypedDict, total=False):
     external_evidence_reason: str
     final_verdict_source: str
     final_verdict_source_detail: str
+    json_repair_events: list[dict[str, Any]]
     recoverable_errors: list[dict[str, Any]]
     result: FinalResultStruct
 

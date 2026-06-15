@@ -335,6 +335,74 @@ class BaseOpenCodeAgentTests(unittest.IsolatedAsyncioTestCase):
             agent._default_llm = original_default_llm
             agent.rag_search.search = original_search
 
+    async def test_run_analysis_with_audit_repairs_opencode_json_with_llm_retry(self):
+        llm = SequenceLLM(
+            [
+                json.dumps(
+                    {
+                        "reasoning": "The code validates input before use.",
+                        "details": ["check allowlist"],
+                        "actions": ["validate input"],
+                        "logic_with_nlp": "Validate input against an allowlist before use.",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "reasoning": "The allowlist logic appears safe after JSON repair.",
+                        "is_vuln": False,
+                        "confidence": "medium",
+                        "evidence_summary": "Recovered structured output preserves the original verdict.",
+                        "external_evidence_used": False,
+                        "external_evidence_sources": [],
+                        "external_evidence_reason": "standard 模式不会主动检索公开资料。",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "reasoning": "Review agrees the recovered allowlist result is safe.",
+                        "is_real_vuln": False,
+                        "confidence": "medium",
+                    }
+                ),
+            ]
+        )
+        original_open_code_agent = agent.OpenCodeAgent
+        original_default_llm = agent._default_llm
+        original_search = agent.rag_search.search
+        SequenceOpenCodeAgent.responses = [
+            json.dumps({"code": "if user_input in ALLOWLIST:\n    return user_input"}),
+            "analysis says it looks safe but not in json",
+        ]
+        SequenceOpenCodeAgent.instances = []
+
+        async def fake_search(**kwargs):
+            return []
+
+        agent.OpenCodeAgent = SequenceOpenCodeAgent
+        agent._default_llm = lambda: llm
+        agent.rag_search.search = fake_search
+
+        try:
+            with TemporaryDirectory() as tmp_dir:
+                repo_path = Path(tmp_dir) / "repo"
+                repo_path.mkdir()
+                patch_path = Path(tmp_dir) / "fix.patch"
+                patch_path.write_text("diff --git a/a.py b/a.py\n+sanitize(user_input)\n", encoding="utf-8")
+                audit_dir = Path(tmp_dir) / "audit"
+                result = await agent.run_analysis_with_audit(str(repo_path), str(patch_path), audit_dir=audit_dir)
+
+                summary = json.loads((audit_dir / "audit_summary.json").read_text(encoding="utf-8"))
+                self.assertEqual(summary["analysis_backend"], "opencode")
+                self.assertTrue(summary["json_repair_events"])
+                self.assertEqual(summary["json_repair_events"][0]["stage"], "opencode_analysis")
+                self.assertEqual(summary["json_repair_events"][0]["repair_method"], "llm_repair")
+                self.assertFalse(result["result"].is_vuln)
+                self.assertTrue((audit_dir / "opencode_analysis_json_repair_retry_response.txt").exists())
+        finally:
+            agent.OpenCodeAgent = original_open_code_agent
+            agent._default_llm = original_default_llm
+            agent.rag_search.search = original_search
+
     async def test_run_analysis_with_audit_triggers_deep_context_analysis(self):
         llm = SequenceLLM(
             [
@@ -651,8 +719,72 @@ class BaseOpenCodeAgentTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(summary["deep_analysis_error"]["node"], "deep_context_analysis")
                 self.assertEqual(len(summary["recoverable_errors"]), 2)
                 self.assertTrue(deep_stage["node_output"]["fallback_triggered"])
-                self.assertEqual(deep_stage["node_output"]["error"]["type"], "OutputParserException")
+                self.assertIn(
+                    deep_stage["node_output"]["error"]["type"],
+                    {"OutputParserException", "JsonRecoveryError"},
+                )
                 self.assertIn("源码上下文深挖执行失败", result["result"].reasoning)
+        finally:
+            agent.OpenCodeAgent = original_open_code_agent
+            agent._default_llm = original_default_llm
+            agent.rag_search.search = original_search
+
+    async def test_run_analysis_with_audit_falls_back_when_opencode_json_repair_still_fails(self):
+        llm = SequenceLLM(
+            [
+                json.dumps(
+                    {
+                        "reasoning": "The sanitizer still looks like a brittle blacklist.",
+                        "details": ["replaces a narrow token set"],
+                        "actions": ["replace token", "return original data"],
+                        "logic_with_nlp": "Replace a narrow token set and then return the original attacker-controlled value.",
+                    }
+                ),
+                "still not json",
+                json.dumps(
+                    {
+                        "reasoning": "The fallback analysis finds the blacklist incomplete.",
+                        "is_vuln": True,
+                        "confidence": "medium",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "reasoning": "Review confirms the sanitizer is still bypassable.",
+                        "is_real_vuln": True,
+                        "confidence": "high",
+                    }
+                ),
+            ]
+        )
+        original_open_code_agent = agent.OpenCodeAgent
+        original_default_llm = agent._default_llm
+        original_search = agent.rag_search.search
+        SequenceOpenCodeAgent.responses = ["not json at all"]
+
+        async def fake_search(**kwargs):
+            return []
+
+        agent.OpenCodeAgent = SequenceOpenCodeAgent
+        agent._default_llm = lambda: llm
+        agent.rag_search.search = fake_search
+
+        try:
+            with TemporaryDirectory() as tmp_dir:
+                repo_path = Path(tmp_dir) / "repo"
+                repo_path.mkdir()
+                audit_dir = Path(tmp_dir) / "audit"
+                result = await agent.run_analysis_with_audit(
+                    repo_path=str(repo_path),
+                    sanitizer_code="dangerous_filter(user_input)",
+                    audit_dir=audit_dir,
+                )
+
+                summary = json.loads((audit_dir / "audit_summary.json").read_text(encoding="utf-8"))
+                self.assertEqual(summary["analysis_backend"], "llm_fallback")
+                self.assertEqual(summary["recoverable_errors"][0]["node"], "opencode_analysis")
+                self.assertTrue((audit_dir / "opencode_analysis_json_parse_error.json").exists())
+                self.assertTrue(result["result"].is_vuln)
         finally:
             agent.OpenCodeAgent = original_open_code_agent
             agent._default_llm = original_default_llm

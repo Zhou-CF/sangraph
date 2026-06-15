@@ -37,5 +37,5 @@ class ValidationStateStruct(TypedDict, total=False):
     report_summary: dict[str, Any]
     prompt_text: str
     opencode_response: str
+    json_repair: dict[str, Any]
     result: ValidationResultStruct
-

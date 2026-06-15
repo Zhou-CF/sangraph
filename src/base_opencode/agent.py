@@ -10,11 +10,12 @@ from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from json_repair import repair_json
 from langchain_core.output_parsers import PydanticOutputParser
 from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel
 from sangraph_logging import get_logger
 
+from json_recovery import JsonRecoveryError, ParseRepairResult, parse_or_repair_json
 from llm_factory.llm_factory import DEFAULT_DASHSCOPE_CHAT_MODEL, llm_factory
 from rag import rag_search
 
@@ -43,9 +44,6 @@ logger = get_logger(__name__)
 
 
 StageFn = Callable[[StateGraphStruct], Awaitable[StateGraphStruct]]
-CODE_FENCE_PATTERN = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
-
-
 def _resolve_repo_path(path: str | Path) -> Path:
     candidate = Path(path)
     if candidate.is_absolute() or candidate.exists():
@@ -64,34 +62,6 @@ def _prompt_text(name: str) -> str:
 
 def _patch_text(path: str) -> str:
     return _resolve_repo_path(path).read_text(encoding="utf-8", errors="ignore")
-
-
-def _strip_code_fence(text: str) -> str:
-    stripped = text.strip()
-    if not stripped:
-        return ""
-    matches = CODE_FENCE_PATTERN.findall(stripped)
-    if matches:
-        return matches[-1].strip()
-    return stripped
-
-
-def _parse_deep_analysis_response(
-    response: str,
-    parser: PydanticOutputParser,
-) -> DeepAnalysisStruct:
-    try:
-        return parser.parse(response)
-    except Exception:
-        stripped = _strip_code_fence(response)
-        if stripped:
-            try:
-                repaired = repair_json(stripped, return_objects=True)
-                if isinstance(repaired, dict):
-                    return DeepAnalysisStruct.model_validate(repaired)
-            except Exception:
-                pass
-        raise
 
 
 def _default_llm():
@@ -325,6 +295,12 @@ def _append_recoverable_error(state: StateGraphStruct, error_payload: dict[str, 
     state["recoverable_errors"] = recoverable_errors
 
 
+def _append_json_repair_event(state: StateGraphStruct, event: dict[str, Any]) -> None:
+    events = list(state.get("json_repair_events", []))
+    events.append(event)
+    state["json_repair_events"] = events
+
+
 def _deep_context_failure_state(error_payload: dict[str, Any]) -> StateGraphStruct:
     short_message = error_payload.get("message", "").splitlines()[0].strip()
     if not short_message:
@@ -382,6 +358,7 @@ def _build_summary(
         "full_analysis_decision": state_to_jsonable({"value": state.get("full_analysis_decision")}).get("value"),
         "review_result": state_to_jsonable({"value": state.get("review_result")}).get("value"),
         "recoverable_errors": state_to_jsonable({"value": state.get("recoverable_errors", [])}).get("value"),
+        "json_repair_events": state_to_jsonable({"value": state.get("json_repair_events", [])}).get("value"),
         "deep_analysis_attempted": bool(
             state.get("deep_analysis_attempted", bool(state.get("deep_analysis")))
         ),
@@ -426,6 +403,40 @@ def _write_stage_artifact(
             "state": state_to_jsonable(state_after),
         },
     )
+
+
+async def _json_repair_llm(prompt: str) -> str:
+    response = await _default_llm().ainvoke(prompt)
+    return response.content
+
+
+async def _parse_structured_output(
+    *,
+    raw_text: str,
+    schema_model: type[BaseModel],
+    stage_name: str,
+    audit_dir: str | Path | None = None,
+    state: StateGraphStruct | None = None,
+) -> BaseModel:
+    result = await parse_or_repair_json(
+        raw_text,
+        schema_model=schema_model,
+        stage_name=stage_name,
+        audit_dir=audit_dir or state.get("audit_dir") if state is not None else None,
+        repair_llm=_json_repair_llm,
+        allow_llm_retry=True,
+    )
+    if state is not None and result.repair_attempted:
+        _append_json_repair_event(
+            state,
+            {
+                "stage": stage_name,
+                "repair_method": result.repair_method,
+                "repair_succeeded": result.repair_succeeded,
+                "artifacts": result.artifacts,
+            },
+        )
+    return result.value
 
 
 def process_logic(sanitizer_logic: SanitizerLogicStruct | None) -> str:
@@ -583,7 +594,6 @@ def _opencode_review_reasoning(parsed: OpenCodeAnalysisStruct) -> str:
 
 
 async def extract_sanitizer_from_patch(state: StateGraphStruct) -> StateGraphStruct:
-    parser = PydanticOutputParser(pydantic_object=SanitizerCodeStruct)
     agent = OpenCodeAgent(
         project_path=_opencode_project_path(state),
         model=os.getenv("OPENCODE_MODEL", DEFAULT_OPENCODE_MODEL),
@@ -593,9 +603,14 @@ async def extract_sanitizer_from_patch(state: StateGraphStruct) -> StateGraphStr
     )
     response = agent.chat(
         f"{prompt}\n\n请仅按以下 JSON 结构回复，不要添加额外说明：\n"
-        f"{parser.get_format_instructions()}"
+        f"{PydanticOutputParser(pydantic_object=SanitizerCodeStruct).get_format_instructions()}"
     )
-    parsed = parser.parse(response)
+    parsed = await _parse_structured_output(
+        raw_text=response,
+        schema_model=SanitizerCodeStruct,
+        stage_name="extract_sanitizer_from_patch",
+        state=state,
+    )
     return {
         "analysis_result": response,
         "sanitizer_code": parsed.code.strip(),
@@ -626,7 +641,12 @@ async def extract_sanitizer_from_candidate(state: StateGraphStruct) -> StateGrap
         f"{prompt}\n\n请仅按以下 JSON 结构回复，不要添加额外说明：\n"
         f"{parser.get_format_instructions()}"
     )
-    parsed = parser.parse(resp.content)
+    parsed = await _parse_structured_output(
+        raw_text=resp.content,
+        schema_model=SanitizerCodeStruct,
+        stage_name="extract_sanitizer_from_candidate",
+        state=state,
+    )
     return {
         "analysis_result": resp.content,
         "sanitizer_code": parsed.code.strip(),
@@ -648,7 +668,12 @@ async def analyze_sanitizer_logic_node(state: StateGraphStruct) -> StateGraphStr
         format_instructions=parser.get_format_instructions(),
     )
     resp = await _default_llm().ainvoke(prompt)
-    sanitizer_logic = parser.parse(resp.content)
+    sanitizer_logic = await _parse_structured_output(
+        raw_text=resp.content,
+        schema_model=SanitizerLogicStruct,
+        stage_name="analyze_sanitizer_logic_node",
+        state=state,
+    )
     return {
         "sanitizer_logic_result": resp.content,
         "sanitizer_logic": sanitizer_logic,
@@ -699,7 +724,12 @@ async def full_analysis(state: StateGraphStruct) -> StateGraphStruct:
         f"{parser.get_format_instructions()}"
     )
     resp = await _default_llm().ainvoke(prompt)
-    decision = parser.parse(resp.content)
+    decision = await _parse_structured_output(
+        raw_text=resp.content,
+        schema_model=AnalysisDecisionStruct,
+        stage_name="full_analysis",
+        state=state,
+    )
     return {
         "full_analysis_result": resp.content,
         "full_analysis_decision": decision,
@@ -731,7 +761,12 @@ async def review_result(state: StateGraphStruct) -> StateGraphStruct:
             f"{analysis_decision.model_dump_json(ensure_ascii=False)}"
         )
     resp = await _default_llm().ainvoke(prompt)
-    review = parser.parse(resp.content)
+    review = await _parse_structured_output(
+        raw_text=resp.content,
+        schema_model=ReviewDecisionStruct,
+        stage_name="review_result",
+        state=state,
+    )
     return {
         "review_result_raw": resp.content,
         "review_result": review,
@@ -782,7 +817,12 @@ async def opencode_analysis(state: StateGraphStruct) -> StateGraphStruct:
             model=os.getenv("OPENCODE_MODEL", DEFAULT_OPENCODE_MODEL),
         )
         response = opencode.chat(prompt)
-        parsed = parser.parse(response)
+        parsed = await _parse_structured_output(
+            raw_text=response,
+            schema_model=OpenCodeAnalysisStruct,
+            stage_name="opencode_analysis",
+            state=state,
+        )
         parsed = parsed.model_copy(
             update={
                 "external_evidence_sources": _normalize_sources(parsed.external_evidence_sources),
@@ -913,7 +953,12 @@ async def deep_context_analysis(state: StateGraphStruct) -> StateGraphStruct:
         model=os.getenv("OPENCODE_MODEL", DEFAULT_OPENCODE_MODEL),
     )
     response = opencode.chat(prompt)
-    deep_result = _parse_deep_analysis_response(response, parser)
+    deep_result = await _parse_structured_output(
+        raw_text=response,
+        schema_model=DeepAnalysisStruct,
+        stage_name="deep_context_analysis",
+        state=state,
+    )
     return {
         "deep_analysis_attempted": True,
         "deep_analysis_result": response,
@@ -1184,6 +1229,7 @@ async def run_analysis_with_audit(
     )
     resolved_audit_dir = _resolve_audit_dir(state.get("patch_path", ""), audit_dir)
     resolved_audit_dir.mkdir(parents=True, exist_ok=True)
+    state["audit_dir"] = str(resolved_audit_dir.resolve())
     logger.info(
         "Starting analysis with audit input_mode=%s audit_dir=%s repo_path_present=%s analysis_profile=%s",
         state.get("input_mode"),
