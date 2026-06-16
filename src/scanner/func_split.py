@@ -20,6 +20,13 @@ class DefinitionRecord:
     definition_kind: str
 
 
+@dataclass(frozen=True)
+class CallableCandidate:
+    container_node: object
+    callable_node: object
+    item_type: str
+
+
 class FunctionSplitter:
     # Tree-sitter node types that introduce a class-like scope.
     CLASS_TYPES = {
@@ -65,6 +72,7 @@ class FunctionSplitter:
     PARAMETER_SCOPE_TYPES = {"parameters", "formal_parameters", "parameter_list", "simple_parameter"}
     PYTHON_DEFINITION_TYPES = {"assignment"}
     JS_DEFINITION_TYPES = {"lexical_declaration", "variable_declaration"}
+    JS_VALUE_FUNC_TYPES = {"function_expression", "arrow_function"}
     GO_DEFINITION_TYPES = {"var_declaration", "const_declaration"}
     JAVA_DEFINITION_TYPES = {"field_declaration"}
     PHP_DEFINITION_TYPES = {"expression_statement"}
@@ -144,29 +152,27 @@ class FunctionSplitter:
             current_stack.append(self._get_signature_header(node))
             current_scope_stack.append(self._node_key(node))
 
-        node_kind = self._node_kind(node)
-        if node_kind in self.FUNC_TYPES:
-            start_line, end_line = self._start_row(node), self._end_row(node)
+        candidate = self._match_callable_candidate(node, current_stack)
+        if candidate is not None:
+            start_line = self._start_row(candidate.container_node)
+            end_line = self._end_row(candidate.container_node)
             func_code = "\n".join(self.lines[start_line : end_line + 1])
 
-            is_go_method = node_kind == "method_declaration" and any(
-                self._node_kind(child) == "receiver" for child in self._children(node)
-            )
-            is_cpp_scoped = "::" in self.lines[start_line] and node_kind == "function_definition"
-
-            if current_stack and not (is_go_method or is_cpp_scoped):
+            if current_stack and candidate.item_type == "method":
                 combined_headers = "\n".join(current_stack)
-                indent = self._get_node_indent(node)
+                indent = self._get_node_indent(candidate.container_node)
                 body_code = f"{combined_headers}\n{indent}⋮\n{func_code}"
-                is_method = True
             else:
                 body_code = func_code
-                is_method = "method" in node_kind or "constructor" in node_kind
 
-            enriched_code, enrichment_meta = self._enrich_function_code(node, body_code, current_scope_stack)
+            enriched_code, enrichment_meta = self._enrich_function_code(
+                candidate.callable_node,
+                body_code,
+                current_scope_stack,
+            )
             results.append(
                 {
-                    "type": "method" if is_method else "function",
+                    "type": candidate.item_type,
                     "start_line": start_line + 1,
                     "end_line": end_line + 1,
                     "code": enriched_code,
@@ -250,7 +256,7 @@ class FunctionSplitter:
 
     def _extract_definition_records(self, node) -> list[DefinitionRecord]:
         kind = self._node_kind(node)
-        if kind in self.FUNC_TYPES:
+        if kind in self.FUNC_TYPES or (self.lang in {"javascript", "typescript"} and kind in {"pair", "assignment_expression"}):
             helper_record = self._extract_helper_definition(node)
             return [helper_record] if helper_record else []
 
@@ -330,8 +336,7 @@ class FunctionSplitter:
         return records
 
     def _extract_helper_definition(self, function_node) -> DefinitionRecord | None:
-        name_node = function_node.child_by_field_name("name")
-        symbol = self._extract_symbol_name(name_node)
+        symbol = self._extract_callable_symbol(function_node)
         if not symbol:
             return None
         tags = self._helper_tags(symbol)
@@ -392,16 +397,17 @@ class FunctionSplitter:
         return set()
 
     def _extract_referenced_symbols(self, function_node) -> set[str]:
+        function_root = self._callable_root_node(function_node)
         referenced: set[str] = set()
-        excluded = self._extract_parameter_symbols(function_node)
-        function_name = self._extract_symbol_name(function_node.child_by_field_name("name"))
+        excluded = self._extract_parameter_symbols(function_root)
+        function_name = self._extract_callable_symbol(function_node)
         if function_name:
             excluded.add(function_name)
 
         def walk(node) -> None:
             for child in self._children(node):
                 child_kind = self._node_kind(child)
-                if child_kind in self.FUNC_TYPES | self.CLASS_TYPES:
+                if child_kind in self.FUNC_TYPES | self.CLASS_TYPES | self.JS_VALUE_FUNC_TYPES:
                     continue
                 if child_kind in self.IDENTIFIER_KINDS:
                     symbol = self._extract_symbol_name(child)
@@ -409,12 +415,13 @@ class FunctionSplitter:
                         referenced.add(symbol)
                 walk(child)
 
-        walk(function_node)
+        walk(function_root)
         return referenced
 
     def _extract_parameter_symbols(self, function_node) -> set[str]:
+        function_root = self._callable_root_node(function_node)
         params: set[str] = set()
-        for child in self._children(function_node):
+        for child in self._children(function_root):
             if self._node_kind(child) not in self.PARAMETER_SCOPE_TYPES:
                 continue
             for param_node in self._iter_nodes(child):
@@ -439,6 +446,11 @@ class FunctionSplitter:
         if node is None:
             return None
         kind = self._node_kind(node)
+        if kind == "pair":
+            return self._extract_symbol_name(node.child_by_field_name("key"))
+        if kind == "assignment_expression":
+            left = node.child_by_field_name("left") or (self._children(node)[0] if self._children(node) else None)
+            return self._extract_assignment_member_symbol(left)
         if kind == "variable_name":
             for child in self._children(node):
                 symbol = self._extract_symbol_name(child)
@@ -451,6 +463,70 @@ class FunctionSplitter:
             return text[1:] if text.startswith("$") else text or None
         if node.child_by_field_name("name") is not None:
             return self._extract_symbol_name(node.child_by_field_name("name"))
+        return None
+
+    def _match_callable_candidate(self, node, class_stack: list[str]) -> CallableCandidate | None:
+        return self._match_default_callable_candidate(node, class_stack) or self._match_javascript_callable_candidate(node)
+
+    def _match_default_callable_candidate(self, node, class_stack: list[str]) -> CallableCandidate | None:
+        node_kind = self._node_kind(node)
+        if node_kind not in self.FUNC_TYPES:
+            return None
+
+        start_line = self._start_row(node)
+        is_go_method = node_kind == "method_declaration" and any(
+            self._node_kind(child) == "receiver" for child in self._children(node)
+        )
+        is_cpp_scoped = "::" in self.lines[start_line] and node_kind == "function_definition"
+        if class_stack and not (is_go_method or is_cpp_scoped):
+            item_type = "method"
+        else:
+            item_type = "method" if "method" in node_kind or "constructor" in node_kind else "function"
+        return CallableCandidate(container_node=node, callable_node=node, item_type=item_type)
+
+    def _match_javascript_callable_candidate(self, node) -> CallableCandidate | None:
+        if self.lang not in {"javascript", "typescript"}:
+            return None
+        return self._match_js_pair_callable(node) or self._match_js_assignment_callable(node)
+
+    def _match_js_pair_callable(self, node) -> CallableCandidate | None:
+        if self._node_kind(node) != "pair":
+            return None
+        value_node = node.child_by_field_name("value")
+        if value_node is None or self._node_kind(value_node) not in self.JS_VALUE_FUNC_TYPES:
+            return None
+        return CallableCandidate(container_node=node, callable_node=value_node, item_type="method")
+
+    def _match_js_assignment_callable(self, node) -> CallableCandidate | None:
+        if self._node_kind(node) != "assignment_expression":
+            return None
+        right = node.child_by_field_name("right")
+        if right is None or self._node_kind(right) not in self.JS_VALUE_FUNC_TYPES:
+            return None
+        return CallableCandidate(container_node=node, callable_node=right, item_type="function")
+
+    def _callable_root_node(self, node):
+        candidate = self._match_javascript_callable_candidate(node)
+        return candidate.callable_node if candidate is not None else node
+
+    def _extract_callable_symbol(self, node) -> str | None:
+        return self._extract_symbol_name(node)
+
+    def _extract_assignment_member_symbol(self, node) -> str | None:
+        if node is None:
+            return None
+        kind = self._node_kind(node)
+        if kind in {"identifier", "property_identifier", "name", "type_identifier", "variable_name"}:
+            return self._extract_symbol_name(node)
+        property_node = node.child_by_field_name("property")
+        if property_node is not None:
+            symbol = self._extract_symbol_name(property_node)
+            if symbol:
+                return symbol
+        for child in reversed(self._children(node)):
+            symbol = self._extract_assignment_member_symbol(child)
+            if symbol:
+                return symbol
         return None
 
     @staticmethod

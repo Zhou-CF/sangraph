@@ -8,6 +8,8 @@ const TABS = [
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 const POLL_INTERVAL_MS = 2000;
+const TASK_LIST_LIMIT = 10;
+const ACTIVE_TASK_STORAGE_KEY = 'sangraph.activeTaskId';
 
 const initialE2E = { repo_path: '', scan_save_path: '' };
 const initialAnalysis = { patch_path: '', sanitizer_code: '', repo_path: '' };
@@ -105,8 +107,7 @@ function formatAnalysisProfile(profile) {
 }
 
 function formatRagRelevanceLabel(relevance) {
-  const label = relevance?.label || 'n/a';
-  return label;
+  return relevance?.label || 'n/a';
 }
 
 function candidateStatusLabel(candidate) {
@@ -125,6 +126,58 @@ function candidateStatusTone(candidate) {
   if (candidate.validation_skipped && candidate.skip_reason === 'analysis_negative') return 'good';
   if (candidate.validation_skipped) return 'warn';
   return badgeTone(candidate.status);
+}
+
+function readStoredActiveTaskId() {
+  if (typeof window === 'undefined') return '';
+  try {
+    return window.localStorage.getItem(ACTIVE_TASK_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function writeStoredActiveTaskId(taskId) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (taskId) {
+      window.localStorage.setItem(ACTIVE_TASK_STORAGE_KEY, taskId);
+    } else {
+      window.localStorage.removeItem(ACTIVE_TASK_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures so UI can still function.
+  }
+}
+
+function sortTasks(tasks) {
+  return [...tasks].sort((left, right) => {
+    const leftActive = left.status === 'running' || left.status === 'queued';
+    const rightActive = right.status === 'running' || right.status === 'queued';
+    if (leftActive !== rightActive) return leftActive ? -1 : 1;
+    return (right.created_at || '').localeCompare(left.created_at || '');
+  });
+}
+
+function mergeTaskIntoList(tasks, task) {
+  if (!task) return sortTasks(tasks);
+  const next = tasks.filter((item) => item.task_id !== task.task_id);
+  next.unshift(task);
+  return sortTasks(next).slice(0, TASK_LIST_LIMIT);
+}
+
+async function fetchTaskList() {
+  const payload = await requestJson(`/api/tasks?limit=${TASK_LIST_LIMIT}`);
+  return sortTasks(payload.tasks || []);
+}
+
+async function fetchTaskDetail(taskId) {
+  const statusPayload = await requestJson(`/api/tasks/${taskId}`);
+  if (statusPayload.status === 'succeeded' || statusPayload.status === 'failed') {
+    const resultPayload = await requestJson(`/api/tasks/${taskId}/result`);
+    return resultPayload;
+  }
+  return statusPayload;
 }
 
 function StatusPill({ children, tone = 'idle' }) {
@@ -180,7 +233,7 @@ function TaskSummary({ task, onDownloadBundle, downloadingBundle }) {
               onClick={() => onDownloadBundle(task.task_id)}
               disabled={downloadingBundle}
             >
-              {downloadingBundle ? '提交中...' : '提交日志'}
+              {downloadingBundle ? 'Submitting...' : 'Download logs'}
             </button>
           ) : null}
         </div>
@@ -201,6 +254,50 @@ function TaskSummary({ task, onDownloadBundle, downloadingBundle }) {
           <p>{task.error.message}</p>
         </div>
       ) : null}
+    </section>
+  );
+}
+
+function RecentTasksPanel({ tasks, activeTaskId, loading, onSelect }) {
+  return (
+    <section className="panel recent-panel">
+      <div className="recent-head">
+        <div>
+          <p className="eyebrow">Recent tasks</p>
+          <h2>Running first</h2>
+        </div>
+        <p className="muted">Showing up to {TASK_LIST_LIMIT} tasks restored from server snapshots.</p>
+      </div>
+      {loading ? <p className="muted">Loading tasks...</p> : null}
+      {!loading && tasks.length === 0 ? (
+        <div className="callout">
+          <p className="mini-label">No tasks</p>
+          <p>No server-side task snapshots were found yet.</p>
+        </div>
+      ) : null}
+      <div className="recent-list">
+        {tasks.map((item) => {
+          const isActive = item.task_id === activeTaskId;
+          return (
+            <button
+              key={item.task_id}
+              type="button"
+              className={`recent-item ${isActive ? 'is-active' : ''}`}
+              onClick={() => onSelect(item.task_id)}
+            >
+              <div className="recent-item-head">
+                <strong>{item.task_type}</strong>
+                <StatusPill tone={badgeTone(item.status)}>{item.status}</StatusPill>
+              </div>
+              <p className="muted mono recent-id">{item.task_id}</p>
+              <div className="stack-inline wrap">
+                <span className="stage-chip">stage: {item.progress_stage}</span>
+                <span className="recent-meta-label">created: {item.created_at}</span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
     </section>
   );
 }
@@ -432,10 +529,15 @@ function App() {
   const [validationForm, setValidationForm] = useState(initialValidation);
   const [health, setHealth] = useState(null);
   const [task, setTask] = useState(null);
-  const [taskResult, setTaskResult] = useState(null);
+  const [activeTaskId, setActiveTaskId] = useState(() => readStoredActiveTaskId());
+  const [recentTasks, setRecentTasks] = useState([]);
+  const [recentTasksLoading, setRecentTasksLoading] = useState(true);
+  const [initialTaskResolved, setInitialTaskResolved] = useState(false);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [downloadingBundle, setDownloadingBundle] = useState(false);
+
+  const activeTask = task;
 
   useEffect(() => {
     requestJson('/api/health')
@@ -444,34 +546,119 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!task || task.status === 'succeeded' || task.status === 'failed') return undefined;
+    let cancelled = false;
+
+    async function restoreTasks() {
+      setRecentTasksLoading(true);
+      try {
+        const tasks = await fetchTaskList();
+        if (cancelled) return;
+        setRecentTasks(tasks);
+
+        const runningTask = tasks.find((item) => item.status === 'running' || item.status === 'queued');
+        const preferredTaskId = runningTask?.task_id || activeTaskId || tasks[0]?.task_id || '';
+
+        if (!preferredTaskId) {
+          setTask(null);
+          setActiveTaskId('');
+          writeStoredActiveTaskId('');
+          return;
+        }
+
+        const detail = await fetchTaskDetail(preferredTaskId);
+        if (cancelled) return;
+        setTask(detail);
+        setActiveTaskId(preferredTaskId);
+        writeStoredActiveTaskId(preferredTaskId);
+        setRecentTasks((current) => mergeTaskIntoList(current, detail));
+      } catch (err) {
+        if (cancelled) return;
+        if (activeTaskId && /Unknown task/.test(err.message)) {
+          setActiveTaskId('');
+          writeStoredActiveTaskId('');
+        } else {
+          setError(err.message);
+        }
+      } finally {
+        if (!cancelled) {
+          setRecentTasksLoading(false);
+          setInitialTaskResolved(true);
+        }
+      }
+    }
+
+    restoreTasks();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!activeTaskId) {
+      writeStoredActiveTaskId('');
+      return;
+    }
+    writeStoredActiveTaskId(activeTaskId);
+  }, [activeTaskId]);
+
+  useEffect(() => {
+    if (!activeTask || activeTask.task_id !== activeTaskId) return undefined;
+    if (activeTask.status === 'succeeded' || activeTask.status === 'failed') return undefined;
+
     const timer = window.setInterval(async () => {
       try {
-        const statusPayload = await requestJson(`/api/tasks/${task.task_id}`);
-        setTask(statusPayload);
-        if (statusPayload.status === 'succeeded' || statusPayload.status === 'failed') {
-          const resultPayload = await requestJson(`/api/tasks/${task.task_id}/result`);
-          setTaskResult(resultPayload);
-          setTask(resultPayload);
-        }
+        const detail = await fetchTaskDetail(activeTaskId);
+        setTask(detail);
+        setRecentTasks((current) => mergeTaskIntoList(current, detail));
       } catch (err) {
+        if (/Unknown task/.test(err.message)) {
+          setTask(null);
+          setActiveTaskId('');
+          writeStoredActiveTaskId('');
+        }
         setError(err.message);
       }
     }, POLL_INTERVAL_MS);
+
     return () => window.clearInterval(timer);
-  }, [task]);
+  }, [activeTask, activeTaskId]);
 
   const panelTitle = useMemo(() => TABS.find((tab) => tab.id === activeTab), [activeTab]);
+
+  async function loadTask(taskId) {
+    setError('');
+    setActiveTaskId(taskId);
+    try {
+      const detail = await fetchTaskDetail(taskId);
+      setTask(detail);
+      setRecentTasks((current) => mergeTaskIntoList(current, detail));
+    } catch (err) {
+      if (/Unknown task/.test(err.message)) {
+        setActiveTaskId('');
+        writeStoredActiveTaskId('');
+        setRecentTasks((current) => current.filter((item) => item.task_id !== taskId));
+      }
+      setError(err.message);
+    }
+  }
+
+  async function refreshRecentTasks() {
+    try {
+      const tasks = await fetchTaskList();
+      setRecentTasks(tasks);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
 
   async function submitTask(path, payload) {
     setSubmitting(true);
     setError('');
-    setTask(null);
-    setTaskResult(null);
     try {
       const created = await requestJson(path, { method: 'POST', body: JSON.stringify(payload) });
-      const statusPayload = await requestJson(`/api/tasks/${created.task_id}`);
-      setTask(statusPayload);
+      await loadTask(created.task_id);
+      await refreshRecentTasks();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -646,7 +833,7 @@ function App() {
                   type="button"
                   onClick={(event) => handleAnalysisSubmit(event, 'enhanced_search')}
                 >
-                  {submitting && analysisProfile === 'enhanced_search' ? 'Submitting...' : '强化分析'}
+                  {submitting && analysisProfile === 'enhanced_search' ? 'Submitting...' : 'Enhanced analysis'}
                 </button>
               </div>
             </form>
@@ -681,12 +868,14 @@ function App() {
 
         <div className="results-column">
           {error ? <div className="callout callout-bad standalone">{error}</div> : null}
-          <TaskSummary
-            task={taskResult || task}
-            onDownloadBundle={handleDownloadBundle}
-            downloadingBundle={downloadingBundle}
+          <RecentTasksPanel
+            tasks={recentTasks}
+            activeTaskId={activeTaskId}
+            loading={recentTasksLoading && !initialTaskResolved}
+            onSelect={loadTask}
           />
-          <ResultsView task={taskResult || task} />
+          <TaskSummary task={activeTask} onDownloadBundle={handleDownloadBundle} downloadingBundle={downloadingBundle} />
+          <ResultsView task={activeTask} />
         </div>
       </div>
     </div>

@@ -28,9 +28,11 @@ from .models import (
     E2ETaskRequest,
     HealthResponse,
     TaskError,
+    TaskListResponse,
     TaskResultEnvelope,
     TaskStage,
     TaskStatus,
+    TaskStatusResponse,
     TaskType,
     ValidationTaskRequest,
 )
@@ -128,6 +130,26 @@ class WebTaskService:
         if envelope.status == "succeeded" and envelope.result is None:
             raise TaskResultNotReadyError(task_id)
         return envelope
+
+    def list_tasks(self, limit: int = 10) -> TaskListResponse:
+        with self._lock:
+            payloads = [dict(task) for task in self._tasks.values()]
+        grouped: list[dict[str, Any]] = []
+        active_tasks = sorted(
+            (payload for payload in payloads if payload.get("status") in {"queued", "running"}),
+            key=lambda payload: payload.get("created_at") or "",
+            reverse=True,
+        )
+        completed_tasks = sorted(
+            (payload for payload in payloads if payload.get("status") not in {"queued", "running"}),
+            key=lambda payload: payload.get("created_at") or "",
+            reverse=True,
+        )
+        grouped.extend(active_tasks)
+        grouped.extend(completed_tasks)
+
+        tasks = [TaskStatusResponse.model_validate(self._status_response_payload(payload)) for payload in grouped[: max(limit, 0)]]
+        return TaskListResponse(tasks=tasks)
 
     async def wait_for_completion(
         self,
@@ -774,6 +796,12 @@ class WebTaskService:
             },
         ).model_dump(mode="json")
         return interrupted_payload, True
+
+    @staticmethod
+    def _status_response_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        status_payload = dict(payload)
+        status_payload.pop("result", None)
+        return status_payload
 
     @classmethod
     def _jsonable(cls, value: Any) -> Any:

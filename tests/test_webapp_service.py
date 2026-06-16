@@ -196,6 +196,38 @@ class WebTaskServiceTests(unittest.TestCase):
             service_module.run_analysis_with_audit = original_analysis
             service_module.run_validation_with_audit = original_validation
 
+    def test_list_tasks_prioritizes_running_and_limits_results(self):
+        with TemporaryDirectory() as tmp_dir:
+            service = WebTaskService(artifact_root=tmp_dir)
+            first_running = service._create_task("analysis", {"patch_path": "/tmp/one.patch"})
+            second_running = service._create_task("validation", {"report_path": "/tmp/report.json", "repo_path": "/tmp/repo"})
+            first_finished = service._create_task("e2e", {"repo_path": "/tmp/repo-a"})
+            second_finished = service._create_task("analysis", {"patch_path": "/tmp/two.patch"})
+
+            service._set_status(first_running, "running")
+            service._set_stage(first_running, "analysis")
+            service._set_status(second_running, "running")
+            service._set_stage(second_running, "validation")
+            service._finalize_task(first_finished, "failed", {"task_type": "e2e", "status": "failed"})
+            service._finalize_task(second_finished, "succeeded", {"task_type": "analysis", "status": "succeeded"})
+
+            listing = service.list_tasks(limit=3)
+
+            self.assertEqual([task.task_id for task in listing.tasks], [second_running, first_running, second_finished])
+
+    def test_list_tasks_includes_restored_snapshots(self):
+        with TemporaryDirectory() as tmp_dir:
+            artifact_root = Path(tmp_dir) / "artifacts"
+            service = WebTaskService(artifact_root=artifact_root)
+            task_id = service._create_task("analysis", {"patch_path": "/tmp/fix.patch"})
+            service._finalize_task(task_id, "succeeded", {"task_type": "analysis", "status": "succeeded"})
+
+            restored = WebTaskService(artifact_root=artifact_root)
+            listing = restored.list_tasks()
+
+            self.assertEqual(len(listing.tasks), 1)
+            self.assertEqual(listing.tasks[0].task_id, task_id)
+
     def test_e2e_only_validates_candidates_flagged_by_analysis(self):
         original_scan = service_module.run_scan
         original_analysis = service_module.run_analysis_with_audit

@@ -74,6 +74,93 @@ function isValidPingHost(host) {
         self.assertIn("SAFE_HOST_RE", item["enriched_context_symbols"])
         self.assertIn("const SAFE_HOST_RE", item["code"])
 
+    def test_javascript_object_property_function_is_split(self):
+        sample = """var obj = {
+  foo: function(x) {
+    return x;
+  }
+};
+"""
+        with TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "sample.js"
+            path.write_text(sample, encoding="utf-8")
+            items = FunctionSplitter(path).split()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["type"], "method")
+        self.assertIn("foo: function", items[0]["code"])
+
+    def test_javascript_object_property_arrow_function_is_split(self):
+        sample = """var obj = {
+  foo: () => 1
+};
+"""
+        with TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "sample.js"
+            path.write_text(sample, encoding="utf-8")
+            items = FunctionSplitter(path).split()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["type"], "method")
+        self.assertIn("foo: () => 1", items[0]["code"])
+
+    def test_javascript_assignment_function_is_split(self):
+        sample = """exports.run = function() {
+  return true;
+};
+"""
+        with TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "sample.js"
+            path.write_text(sample, encoding="utf-8")
+            items = FunctionSplitter(path).split()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["type"], "function")
+        self.assertIn("exports.run = function()", items[0]["code"])
+
+    def test_javascript_callback_function_expression_is_not_split(self):
+        sample = """setTimeout(function() {
+  work();
+}, 100);
+"""
+        with TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "sample.js"
+            path.write_text(sample, encoding="utf-8")
+            items = FunctionSplitter(path).split()
+
+        self.assertEqual(items, [])
+
+    def test_javascript_amd_wrapper_function_is_not_split(self):
+        sample = """define([], function() {
+  return {};
+});
+"""
+        with TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "sample.js"
+            path.write_text(sample, encoding="utf-8")
+            items = FunctionSplitter(path).split()
+
+        self.assertEqual(items, [])
+
+    def test_javascript_object_property_function_enriches_regex_definition(self):
+        sample = """const SAFE_HOST_RE = /^[A-Za-z0-9.-]{1,253}$/;
+
+var validator = {
+  isValidPingHost: function(host) {
+    return SAFE_HOST_RE.test(host);
+  }
+};
+"""
+        with TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "sample.js"
+            path.write_text(sample, encoding="utf-8")
+            items = FunctionSplitter(path).split()
+
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0]["context_enrichment_applied"])
+        self.assertIn("SAFE_HOST_RE", items[0]["enriched_context_symbols"])
+        self.assertIn("const SAFE_HOST_RE", items[0]["code"])
+
     def test_java_method_enriches_class_field_pattern(self):
         sample = """class Demo {
     static final Pattern SAFE_HOST_RE = Pattern.compile("^[A-Za-z0-9.-]{1,253}$");

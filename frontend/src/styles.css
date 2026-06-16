@@ -298,7 +298,8 @@ textarea {
 }
 
 .task-panel,
-.results-panel {
+.results-panel,
+.recent-panel {
   animation: rise 280ms ease;
 }
 
@@ -324,6 +325,13 @@ textarea {
 
 .stack-inline.wrap {
   flex-wrap: wrap;
+}
+
+.recent-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: start;
 }
 
 .task-meta {
@@ -365,6 +373,51 @@ textarea {
 .callout,
 .validation-panel {
   padding: 16px;
+}
+
+.recent-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.recent-item {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--paper-strong);
+  padding: 16px;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 180ms ease, border-color 180ms ease, background 180ms ease;
+}
+
+.recent-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(23, 83, 166, 0.35);
+}
+
+.recent-item.is-active {
+  border-color: rgba(178, 73, 32, 0.45);
+  background: linear-gradient(135deg, rgba(178, 73, 32, 0.12), rgba(255, 255, 255, 0.82));
+}
+
+.recent-item-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+
+.recent-id {
+  margin: 8px 0 10px;
+  font-size: 0.82rem;
+}
+
+.recent-meta-label {
+  color: var(--muted);
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
 }
 
 .callout-bad {
@@ -451,6 +504,14 @@ summary {
   .hero-panel,
   .panel {
     padding: 20px;
+  }
+
+  .recent-head,
+  .recent-item-head,
+  .task-head,
+  .candidate-head,
+  .results-head {
+    flex-direction: column;
   }
 
   .tab-row {

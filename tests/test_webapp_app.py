@@ -124,6 +124,25 @@ class WebappAppTests(unittest.TestCase):
             self.assertEqual(payload["error"]["code"], "server_restarted")
             self.assertIsNone(payload["result"])
 
+    def test_list_tasks_returns_recent_summaries_without_results(self):
+        with TemporaryDirectory() as tmp_dir:
+            service = WebTaskService(artifact_root=Path(tmp_dir) / "artifacts")
+            running_task = service._create_task("analysis", {"patch_path": "/tmp/fix.patch"})
+            finished_task = service._create_task("validation", {"report_path": "/tmp/report.json", "repo_path": "/tmp/repo"})
+            service._set_status(running_task, "running")
+            service._set_stage(running_task, "analysis")
+            service._finalize_task(finished_task, "succeeded", {"task_type": "validation", "status": "succeeded"})
+
+            client = TestClient(create_app(service))
+            response = client.get("/api/tasks")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(len(payload["tasks"]), 2)
+            self.assertEqual(payload["tasks"][0]["task_id"], running_task)
+            self.assertNotIn("result", payload["tasks"][0])
+            self.assertEqual(payload["tasks"][1]["task_id"], finished_task)
+
 
 if __name__ == "__main__":
     unittest.main()

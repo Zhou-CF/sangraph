@@ -14,6 +14,7 @@ from .models import (
     E2ETaskRequest,
     HealthResponse,
     TaskCreatedResponse,
+    TaskListResponse,
     TaskResultEnvelope,
     TaskStatusResponse,
     ValidationTaskRequest,
@@ -77,6 +78,10 @@ def create_app(service: WebTaskService | None = None) -> FastAPI:
     async def create_validation_task(request: ValidationTaskRequest) -> TaskCreatedResponse:
         task_id = await app.state.task_service.submit_validation(request)
         return TaskCreatedResponse(task_id=task_id)
+
+    @app.get("/api/tasks", response_model=TaskListResponse)
+    async def list_tasks(limit: int = 10) -> TaskListResponse:
+        return app.state.task_service.list_tasks(limit=limit)
 
     @app.get("/api/tasks/{task_id}", response_model=TaskStatusResponse)
     async def get_task_status(task_id: str) -> TaskStatusResponse:

@@ -60,6 +60,10 @@ class TaskResultEnvelope(TaskStatusResponse):
     result: dict[str, Any] | None = None
 
 
+class TaskListResponse(BaseModel):
+    tasks: list[TaskStatusResponse]
+
+
 class DependencyCheck(BaseModel):
     available: bool
     detail: str
